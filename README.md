@@ -1,7 +1,7 @@
 # Socks-VPS
 
 ```bash
-bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/download/v1.0.3/install-v1.0.3.sh)
+bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/download/v1.0.4/install-v1.0.4.sh)
 ```
 
 | | Socks-VPS | 通用 SOCKS 安装脚本 |
@@ -15,6 +15,9 @@ Socks-VPS 是运行在 Linux VPS 上的标准 SOCKS5 服务。它监听
 `0.0.0.0`，只接受 RFC 1929 用户名/密码认证和 TCP `CONNECT`，只连接
 公网 IPv4 目标。IPv6、UDP、私网、本机地址、链路本地地址、云元数据和
 IANA 特殊用途 IPv4 目标会被拒绝。
+
+初版目标、已确认方案和验收边界记录在
+[`docs/initial-baseline.md`](https://github.com/mqfut123/Socks-VPS/blob/main/docs/initial-baseline.md)。
 
 ## 支持环境
 
@@ -124,14 +127,14 @@ sudo /var/backups/socks-vps/<backup>/restore.sh --restore /var/backups/socks-vps
 本地构建包：
 
 ```bash
-./scripts/build-release.sh 1.0.3
+./scripts/build-release.sh 1.0.4
 ```
 
 此模式会构建 `linux/amd64` 和 `linux/arm64` 版本，但公开发布校验保持
 阻塞。公开发布构建：
 
 ```bash
-./scripts/build-release.sh 1.0.3 https://github.com/mqfut123/Socks-VPS
+./scripts/build-release.sh 1.0.4 https://github.com/mqfut123/Socks-VPS
 ```
 
 GitHub Release `v<VERSION>` 必须包含：
@@ -144,14 +147,15 @@ GitHub Release `v<VERSION>` 必须包含：
 
 构建使用全新的版本化 `dist/staging/<version>-<target>`，对应路径已存在
 时停止，不覆盖历史构建。每个归档包含程序、安装器、两个 units、四个
-IPdeny 文件、第三方许可、
+IPdeny 文件、项目 MIT 许可、第三方许可、
 `MANIFEST.sha256` 和版本/架构信息；包校验检查成员 allowlist、逐文件哈希、
 源码与包内文档、脚本、units、许可及 IPdeny 字节一致性、ELF 架构，
 并以锁定依赖和当前源码重建二进制进行字节比对。未配置真实 HTTPS 项目
 地址时，公开发布校验保持阻塞。
 
-Socks-VPS 本身的项目许可证尚未指定。发布包只附带 go-gost/gosocks5 的
-MIT 许可和 IPdeny 的上游版权文件。
+Socks-VPS 以 [MIT License](LICENSE) 发布。发布包根目录包含项目
+`LICENSE`，同时附带 go-gost/gosocks5 的 MIT 许可和 IPdeny 的上游版权
+文件。
 
 ## 验证状态
 
@@ -176,3 +180,8 @@ MIT 许可和 IPdeny 的上游版权文件。
 
 仍需独立完成 DNF/YUM、`arm64`、真实 CN/GFW 来源、active firewalld
 以及与 WARP VPS Manager 同机的完整验收。
+
+## 维护交接
+
+- 当前活跃交接：[HANDOFF.md](https://github.com/mqfut123/Socks-VPS/blob/main/HANDOFF.md)
+- 历史时间线与完整归档：[docs/handoffs/README.md](https://github.com/mqfut123/Socks-VPS/blob/main/docs/handoffs/README.md)

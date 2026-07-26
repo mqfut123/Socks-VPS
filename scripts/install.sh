@@ -85,6 +85,7 @@ check_package() {
         "assets/ipdeny/Copyrights.txt"
         "assets/ipdeny/MD5SUM.upstream"
         "assets/ipdeny/SOURCE.json"
+        "LICENSE"
         "licenses/go-gost-gosocks5-LICENSE"
         "THIRD_PARTY_NOTICES.md"
         "README.md"
@@ -693,6 +694,7 @@ install_release_tree() {
         "${package_root}/licenses/go-gost-gosocks5-LICENSE" \
         "${release_dir}/licenses/go-gost-gosocks5-LICENSE"
     install -m 0644 -o root -g root \
+        "${package_root}/LICENSE" \
         "${package_root}/THIRD_PARTY_NOTICES.md" \
         "${package_root}/README.md" \
         "${package_root}/SOURCE_MANIFEST.sha256" \

@@ -10,5 +10,5 @@ Socks-VPS redistributes the following third-party material:
 - IPdeny CN IPv4 aggregated zone data. The upstream copyright and
   redistribution notice is in `assets/ipdeny/Copyrights.txt`.
 
-This file records third-party notices only. It does not grant a license for
-Socks-VPS itself.
+This file records third-party notices only. Socks-VPS itself is distributed
+under the MIT License in `LICENSE`.
