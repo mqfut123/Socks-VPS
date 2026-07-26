@@ -77,6 +77,11 @@ grep -Fq -- '--no-xattrs --no-acls --no-fflags' \
 grep -Fq 'packaged binary does not match a locked rebuild' \
     "${project_root}/scripts/check-release.sh" ||
     fail 'release validation does not bind the binary to the current source'
+grep -Fq '"${package_root}/LICENSE"' "${project_root}/scripts/install.sh" ||
+    fail 'installed release tree omits the project license'
+grep -Fq '"${project_root}/LICENSE" "${stage}/LICENSE"' \
+    "${project_root}/scripts/build-release.sh" ||
+    fail 'release archive omits the project license'
 
 if grep -R -E '(^|[;&|[:space:]])(rm|rmdir)([[:space:]]|$)' \
     "${project_root}/scripts" \

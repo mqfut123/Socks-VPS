@@ -29,6 +29,7 @@ source_input_paths() {
             printf '%s\n' \
                 go.mod \
                 go.sum \
+                LICENSE \
                 README.md \
                 THIRD_PARTY_NOTICES.md \
                 scripts/install.sh \
@@ -168,6 +169,7 @@ copy_release_files() {
     install -m 0644 \
         "${project_root}/packaging/licenses/go-gost-gosocks5-LICENSE" \
         "${stage}/licenses/go-gost-gosocks5-LICENSE"
+    install -m 0644 "${project_root}/LICENSE" "${stage}/LICENSE"
     install -m 0644 "${project_root}/THIRD_PARTY_NOTICES.md" "${stage}/"
     render_release_text \
         "${project_root}/README.md" \

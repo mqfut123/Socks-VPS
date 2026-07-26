@@ -32,6 +32,7 @@ source_input_paths() {
             printf '%s\n' \
                 go.mod \
                 go.sum \
+                LICENSE \
                 README.md \
                 THIRD_PARTY_NOTICES.md \
                 scripts/install.sh \
@@ -133,6 +134,7 @@ main() {
 
     expected_files=(
         "${root_name}/MANIFEST.sha256"
+        "${root_name}/LICENSE"
         "${root_name}/README.md"
         "${root_name}/SOURCE_MANIFEST.sha256"
         "${root_name}/TARGET"
@@ -217,6 +219,9 @@ main() {
     compare_archive_member \
         "${archive}" "${root_name}/THIRD_PARTY_NOTICES.md" \
         "${project_root}/THIRD_PARTY_NOTICES.md"
+    compare_archive_member \
+        "${archive}" "${root_name}/LICENSE" \
+        "${project_root}/LICENSE"
     compare_archive_member \
         "${archive}" "${root_name}/licenses/go-gost-gosocks5-LICENSE" \
         "${project_root}/packaging/licenses/go-gost-gosocks5-LICENSE"
