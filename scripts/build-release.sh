@@ -213,6 +213,7 @@ build_target() {
     if tar --version 2>&1 | grep -Fq bsdtar; then
         COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 \
             tar -czf "${archive}" \
+                --no-xattrs --no-acls --no-fflags \
                 --uid 0 --gid 0 --uname root --gname root \
                 -C "${project_root}/dist/staging" "${root_name}"
     else
