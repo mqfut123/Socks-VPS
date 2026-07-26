@@ -21,10 +21,14 @@ require_root() {
 }
 
 require_runtime() {
+    local action=$1
+
     [[ -x ${binary} ]] || die "missing executable: ${binary}"
-    [[ -r ${config} ]] || die "missing configuration: ${config}"
-    [[ -r ${zone} ]] || die "missing IPdeny zone: ${zone}"
     command -v nft >/dev/null 2>&1 || die 'nft command is unavailable'
+    if [[ ${action} == apply ]]; then
+        [[ -r ${config} ]] || die "missing configuration: ${config}"
+        [[ -r ${zone} ]] || die "missing IPdeny zone: ${zone}"
+    fi
     install -d -m 0750 -o root -g root "${runtime_dir}"
 }
 
@@ -93,19 +97,38 @@ remove_rules() {
     fi
 }
 
+reload_rules() {
+    local status
+
+    if "$0" apply; then
+        return 0
+    else
+        status=$?
+    fi
+    if ! systemctl --no-block stop socks-vps.service; then
+        die 'rule reload failed and the main service could not be queued for stop'
+    fi
+    printf 'socks-vps-firewall: rule reload failed; main service stop queued\n' >&2
+    return "${status}"
+}
+
 main() {
     require_root
-    require_runtime
 
     case ${1:-} in
         apply)
+            require_runtime apply
             apply_rules
             ;;
+        reload)
+            reload_rules
+            ;;
         remove)
+            require_runtime remove
             remove_rules
             ;;
         *)
-            die 'usage: firewall.sh {apply|remove}'
+            die 'usage: firewall.sh {apply|reload|remove}'
             ;;
     esac
 }

@@ -16,12 +16,20 @@ grep -Fxq 'Requires=socks-vps-firewall.service' "${main_unit}" ||
     fail 'main service does not require the firewall service'
 grep -Fxq 'After=network-online.target socks-vps-firewall.service' "${main_unit}" ||
     fail 'main service is not ordered after the firewall'
-grep -Fxq 'PartOf=socks-vps.service' "${firewall_unit}" ||
-    fail 'stopping or restarting the main service will not propagate to the firewall'
+grep -Fxq 'PartOf=socks-vps.service nftables.service' "${firewall_unit}" ||
+    fail 'main or native nftables lifecycle will not propagate to the firewall'
 grep -Fxq 'BindsTo=socks-vps.service' "${firewall_unit}" ||
     fail 'unexpected main-service loss will leave the firewall active'
 grep -Fxq 'After=nftables.service firewalld.service ufw.service' "${firewall_unit}" ||
     fail 'firewall service ordering is incomplete'
+grep -Fxq 'ReloadPropagatedFrom=nftables.service' "${firewall_unit}" ||
+    fail 'native nftables reload will not reapply the Socks-VPS table'
+grep -Fxq 'ExecReload=/usr/local/lib/socks-vps/current/scripts/firewall.sh reload' \
+    "${firewall_unit}" ||
+    fail 'firewall reload does not use the fail-closed reload path'
+grep -Fq 'systemctl --no-block stop socks-vps.service' \
+    "${project_root}/scripts/firewall.sh" ||
+    fail 'firewall reload failure does not queue the main service for stop'
 grep -Fxq 'RestartPreventExitStatus=64 78' "${main_unit}" ||
     fail 'configuration and bind failures are not excluded from restart'
 if grep -Fq 'ExecStartPre=' "${main_unit}"; then

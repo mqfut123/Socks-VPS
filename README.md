@@ -1,7 +1,7 @@
 # Socks-VPS
 
 ```bash
-bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/download/v1.0.2/install-v1.0.2.sh)
+bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/download/v1.0.3/install-v1.0.3.sh)
 ```
 
 | | Socks-VPS | 通用 SOCKS 安装脚本 |
@@ -55,6 +55,12 @@ sudo systemctl restart socks-vps.service
 项目自有防火墙随之处理；主进程意外退出时防火墙也会撤销，直接停止防火墙
 则会停止主服务。安装器的更新、重装、恢复和卸载会依次显式停止主服务与
 防火墙服务，并确认两个 unit 均不活动且自有 nftables 表已撤销后再改文件。
+通过 systemd reload 原生 `nftables.service` 后，自有规则会重新应用；
+规则重建失败时主服务停止。restart 时主服务随防火墙重启，并在自有规则
+就绪后恢复监听。
+若原生 `nftables.service` 当前未运行，需要在 Socks-VPS 运行期间启用它，
+请使用 `sudo systemctl restart nftables.service`；单独 start 不会触发上述
+停止与重建顺序。
 
 ## 认证
 
@@ -73,6 +79,9 @@ sudo systemctl restart socks-vps.service
 `table inet warp_vps` 或任何 WARP VPS Manager 服务、端口、网卡、路由、
 配置和状态。IPdeny 数据只覆盖其当前 CN 地址分配集合，不是 GFW 探测节点
 名单。
+
+`cn_ipv4` set 的固定注释是运行时所有权标记；缺少该标记的同名 table
+视为外部资源，安装器不会替换或删除。
 
 仓库中的四个权威上游文件为：
 
@@ -115,14 +124,14 @@ sudo /var/backups/socks-vps/<backup>/restore.sh --restore /var/backups/socks-vps
 本地构建包：
 
 ```bash
-./scripts/build-release.sh 1.0.2
+./scripts/build-release.sh 1.0.3
 ```
 
 此模式会构建 `linux/amd64` 和 `linux/arm64` 版本，但公开发布校验保持
 阻塞。公开发布构建：
 
 ```bash
-./scripts/build-release.sh 1.0.2 https://github.com/mqfut123/Socks-VPS
+./scripts/build-release.sh 1.0.3 https://github.com/mqfut123/Socks-VPS
 ```
 
 GitHub Release `v<VERSION>` 必须包含：
@@ -147,14 +156,23 @@ MIT 许可和 IPdeny 的上游版权文件。
 ## 验证状态
 
 本地发布门禁要求 Go 测试、shell 语法、systemd 静态契约、发布包成员与
-字节校验全部通过。生产支持结论还需要在真实 VPS 上完成：
+字节校验全部通过。
 
-- APT 与 DNF/YUM 各一套。
-- `amd64` 与 `arm64`。
-- CN 与非 CN 控制来源。
-- systemd、nftables、firewalld/UFW 重载和开机启动。
-- 主进程意外退出或 bind 失败时，自有防火墙表随之撤销；直接停止任一
-  Socks-VPS unit 时另一 unit 按依赖关系停止。
-- 与 WARP VPS Manager 同机安装、更新、重启和卸载。
+2026-07-26 在 Ubuntu 22.04 `amd64` KVM VPS 完成：
 
-未完成的真实 VPS 项目不会用本地测试结果代替。
+- 公开包自动端口安装、用户名密码认证、TCP `CONNECT`、公网 IPv4 出口，
+  以及 IPv6、UDP、BIND、私网、回环和元数据目标拒绝。
+- IPdeny CN set 的隔离来源命中测试；该项是规则模拟，不是真实 CN/GFW
+  来源验收。
+- nftables 自有表重复加载、主进程异常退出、端口冲突、配置错误、unit
+  停止传播、原生 nftables reload/restart、规则重建失败停止监听和开机
+  启动。
+- UFW 启用、reload、默认拒绝和还原；UFW 拒绝代理端口时，Socks-VPS
+  不会绕过现有防火墙。
+- 三轮各 256 条 TCP 隧道、256 条慢握手连接和活动隧道停服清理；实测
+  峰值 RSS 约 10.7 MiB、cgroup 内存约 13.2 MiB，慢握手在
+  10.03–10.19 秒关闭。
+- 保留端口和凭据的更新、可恢复卸载、恢复及重启后验收。
+
+仍需独立完成 DNF/YUM、`arm64`、真实 CN/GFW 来源、active firewalld
+以及与 WARP VPS Manager 同机的完整验收。
