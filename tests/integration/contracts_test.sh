@@ -59,6 +59,10 @@ grep -Fq 'go mod verify' "${project_root}/scripts/build-release.sh" ||
     fail 'release build does not verify downloaded Go modules'
 grep -Fq 'go test -mod=readonly ./...' "${project_root}/scripts/build-release.sh" ||
     fail 'release build does not run locked tests before creating dist'
+grep -Fq -- '-buildvcs=false' "${project_root}/scripts/build-release.sh" ||
+    fail 'release binary embeds repository-dependent VCS metadata'
+grep -Fq -- '-buildvcs=false' "${project_root}/scripts/check-release.sh" ||
+    fail 'release rebuild depends on repository VCS metadata'
 grep -Fq 'packaged binary does not match a locked rebuild' \
     "${project_root}/scripts/check-release.sh" ||
     fail 'release validation does not bind the binary to the current source'

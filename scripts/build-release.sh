@@ -139,6 +139,7 @@ copy_release_files() {
         cd "${project_root}"
         CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
             go build \
+                -buildvcs=false \
                 -mod=readonly \
                 -trimpath \
                 -ldflags="-buildid=${source_digest}" \

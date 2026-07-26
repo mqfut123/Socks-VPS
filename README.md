@@ -1,7 +1,7 @@
 # Socks-VPS
 
 ```bash
-bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/download/v1.0.0/install-v1.0.0.sh)
+bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/download/v1.0.1/install-v1.0.1.sh)
 ```
 
 | | Socks-VPS | 通用 SOCKS 安装脚本 |
@@ -115,14 +115,14 @@ sudo /var/backups/socks-vps/<backup>/restore.sh --restore /var/backups/socks-vps
 本地构建包：
 
 ```bash
-./scripts/build-release.sh 1.0.0
+./scripts/build-release.sh 1.0.1
 ```
 
 此模式会构建 `linux/amd64` 和 `linux/arm64` 版本，但公开发布校验保持
 阻塞。公开发布构建：
 
 ```bash
-./scripts/build-release.sh 1.0.0 https://github.com/mqfut123/Socks-VPS
+./scripts/build-release.sh 1.0.1 https://github.com/mqfut123/Socks-VPS
 ```
 
 GitHub Release `v<VERSION>` 必须包含：
