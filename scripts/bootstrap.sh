@@ -5,6 +5,8 @@ set -Eeuo pipefail
 
 readonly release_base_url='@RELEASE_BASE_URL@'
 readonly release_version='@RELEASE_VERSION@'
+readonly archive_sha256_amd64='@ARCHIVE_SHA256_AMD64@'
+readonly archive_sha256_arm64='@ARCHIVE_SHA256_ARM64@'
 
 die() {
     printf 'Socks-VPS bootstrap: %s\n' "$*" >&2
@@ -46,16 +48,11 @@ check_member_path() {
 }
 
 main() {
-    local arch archive archive_url checksum_url expected actual work_dir package_root
+    local arch archive archive_url expected actual work_dir package_root
 
     [[ $(uname -s) == Linux ]] || die 'Linux is required'
     command -v systemctl >/dev/null 2>&1 || die 'systemd is required'
     [[ -d /run/systemd/system ]] || die 'systemd is not running'
-    if ! command -v apt-get >/dev/null 2>&1 &&
-       ! command -v dnf >/dev/null 2>&1 &&
-       ! command -v yum >/dev/null 2>&1; then
-        die 'apt, dnf, or yum is required'
-    fi
     command -v curl >/dev/null 2>&1 || die 'curl is required'
     command -v tar >/dev/null 2>&1 || die 'tar is required'
 
@@ -66,23 +63,26 @@ main() {
         die 'release version is invalid'
 
     arch=$(detect_arch)
+    case ${arch} in
+        amd64)
+            expected=${archive_sha256_amd64}
+            ;;
+        arm64)
+            expected=${archive_sha256_arm64}
+            ;;
+    esac
+    [[ ${expected} =~ ^[0-9a-fA-F]{64}$ ]] ||
+        die 'embedded release checksum is invalid'
+
     archive="socks-vps-v${release_version}-linux-${arch}.tar.gz"
     archive_url="${release_base_url%/}/v${release_version}/${archive}"
-    checksum_url="${archive_url}.sha256"
     work_dir=$(mktemp -d "${TMPDIR:-/tmp}/socks-vps-bootstrap.XXXXXXXX")
 
     printf 'Downloading Socks-VPS %s for linux/%s\n' "${release_version}" "${arch}"
     curl --fail --silent --show-error --location \
         --proto '=https' --tlsv1.2 \
         --output "${work_dir}/${archive}" "${archive_url}"
-    curl --fail --silent --show-error --location \
-        --proto '=https' --tlsv1.2 \
-        --output "${work_dir}/${archive}.sha256" "${checksum_url}"
 
-    read -r expected extra <"${work_dir}/${archive}.sha256" ||
-        die 'could not read release checksum'
-    [[ ${expected} =~ ^[0-9a-fA-F]{64}$ && -z ${extra:-} ]] ||
-        die 'release checksum file has an invalid format'
     actual=$(sha256_file "${work_dir}/${archive}")
     actual=$(printf '%s' "${actual}" | tr '[:upper:]' '[:lower:]')
     expected=$(printf '%s' "${expected}" | tr '[:upper:]' '[:lower:]')
@@ -97,7 +97,7 @@ main() {
     [[ -x ${package_root}/scripts/install.sh ]] ||
         die 'release package does not contain the installer'
 
-    exec "${package_root}/scripts/install.sh"
+    exec "${package_root}/scripts/install.sh" "$@"
 }
 
 main "$@"

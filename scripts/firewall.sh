@@ -4,7 +4,7 @@ set +x
 set -Eeuo pipefail
 
 readonly binary=/usr/local/bin/socks-vps
-readonly config=/etc/socks-vps/config.json
+readonly config_dir=/etc/socks-vps/instances
 readonly zone=/usr/local/lib/socks-vps/current/assets/ipdeny/cn-aggregated.zone
 readonly runtime_dir=/run/socks-vps
 readonly existing_json="${runtime_dir}/existing-table.json"
@@ -21,15 +21,19 @@ require_root() {
 }
 
 require_runtime() {
-    local action=$1
-
     [[ -x ${binary} ]] || die "missing executable: ${binary}"
-    command -v nft >/dev/null 2>&1 || die 'nft command is unavailable'
-    if [[ ${action} == apply ]]; then
-        [[ -r ${config} ]] || die "missing configuration: ${config}"
-        [[ -r ${zone} ]] || die "missing IPdeny zone: ${zone}"
-    fi
+    [[ -d ${config_dir} ]] || die "missing configuration directory: ${config_dir}"
     install -d -m 0750 -o root -g root "${runtime_dir}"
+}
+
+nft_available() {
+    command -v nft >/dev/null 2>&1
+}
+
+blocked_cn_ports() {
+    "${binary}" config-ports \
+        --config-dir "${config_dir}" \
+        --blocked-cn-only
 }
 
 capture_existing_table() {
@@ -54,45 +58,107 @@ capture_existing_table() {
     printf '%s\n' absent
 }
 
-apply_rules() {
-    local table_state
+render_apply_batch() {
+    local table_state=$1
+    local blocked_ports=$2
     local -a render_args
-
-    "${binary}" config-check --config "${config}"
-    table_state=$(capture_existing_table)
 
     render_args=(
         firewall-render
-        --config "${config}"
-        --zone "${zone}"
+        --config-dir "${config_dir}"
         --output "${rules_file}"
     )
+    if [[ -n ${blocked_ports} ]]; then
+        [[ -r ${zone} ]] || die "missing IPdeny zone: ${zone}"
+        render_args+=(--zone "${zone}")
+    fi
     if [[ ${table_state} == present ]]; then
         render_args+=(--existing-table-json "${existing_json}")
     fi
 
     "${binary}" "${render_args[@]}"
-    nft --check --file "${rules_file}"
-    nft --file "${rules_file}"
+}
+
+render_remove_batch() {
+    local blocked_ports=$1
+
+    if [[ -n ${blocked_ports} ]]; then
+        "${binary}" firewall-render \
+            --remove \
+            --existing-table-json "${existing_json}" \
+            --output "${remove_file}"
+        return
+    fi
+
+    "${binary}" firewall-render \
+        --config-dir "${config_dir}" \
+        --existing-table-json "${existing_json}" \
+        --output "${remove_file}"
+}
+
+apply_batch() {
+    local path=$1
+
+    nft --check --file "${path}"
+    nft --file "${path}"
+}
+
+batch_has_commands() {
+    [[ -s $1 ]]
+}
+
+record_owned_table() {
     nft --json list table ip socks_vps >"${existing_json}"
 }
 
+owned_table_is_absent() {
+    ! nft list table ip socks_vps >/dev/null 2>&1
+}
+
+apply_rules() {
+    local blocked_ports table_state
+
+    blocked_ports=$(blocked_cn_ports)
+    if ! nft_available; then
+        [[ -z ${blocked_ports} ]] && return 0
+        die 'nft command is unavailable while one or more ports block CN sources'
+    fi
+
+    table_state=$(capture_existing_table)
+    render_apply_batch "${table_state}" "${blocked_ports}"
+    if ! batch_has_commands "${rules_file}"; then
+        return 0
+    fi
+    apply_batch "${rules_file}"
+
+    if [[ -n ${blocked_ports} ]]; then
+        record_owned_table
+    elif ! owned_table_is_absent; then
+        die 'owned nftables table still exists after CN blocking was disabled'
+    fi
+}
+
 remove_rules() {
-    local table_state
+    local blocked_ports table_state
+
+    blocked_ports=$(blocked_cn_ports)
+    if ! nft_available; then
+        [[ -z ${blocked_ports} ]] && return 0
+        die 'nft command is unavailable while one or more ports block CN sources'
+    fi
 
     table_state=$(capture_existing_table)
     if [[ ${table_state} == absent ]]; then
         return 0
     fi
 
-    "${binary}" firewall-render \
-        --remove \
-        --existing-table-json "${existing_json}" \
-        --output "${remove_file}"
-    nft --check --file "${remove_file}"
-    nft --file "${remove_file}"
+    render_remove_batch "${blocked_ports}"
+    if ! batch_has_commands "${remove_file}"; then
+        return 0
+    fi
+    apply_batch "${remove_file}"
 
-    if nft list table ip socks_vps >/dev/null 2>&1; then
+    if ! owned_table_is_absent; then
         die 'owned nftables table still exists after removal'
     fi
 }
@@ -114,17 +180,16 @@ reload_rules() {
 
 main() {
     require_root
+    require_runtime
 
     case ${1:-} in
         apply)
-            require_runtime apply
             apply_rules
             ;;
         reload)
             reload_rules
             ;;
         remove)
-            require_runtime remove
             remove_rules
             ;;
         *)
@@ -133,4 +198,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi
