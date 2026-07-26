@@ -357,7 +357,17 @@ func TestFirewallRenderApplyAndRemove(t *testing.T) {
 	}
 
 	existingPath := filepath.Join(directory, "existing.json")
-	existing := `{"nftables":[{"table":{"family":"ip","name":"socks_vps","comment":"Socks-VPS managed table"}}]}`
+	existing := `{
+		"nftables": [
+			{"table": {"family": "ip", "name": "socks_vps"}},
+			{"set": {
+				"family": "ip",
+				"table": "socks_vps",
+				"name": "cn_ipv4",
+				"comment": "Socks-VPS managed CN IPv4 set"
+			}}
+		]
+	}`
 	if err := os.WriteFile(existingPath, []byte(existing), 0o600); err != nil {
 		t.Fatalf("write existing table JSON: %v", err)
 	}

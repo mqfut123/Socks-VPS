@@ -18,8 +18,8 @@ const (
 	SetName     = "cn_ipv4"
 	ChainName   = "input"
 
-	OwnershipComment = "Socks-VPS managed table"
-	setComment       = "Socks-VPS managed CN IPv4 set"
+	tableComment     = "Socks-VPS managed table"
+	OwnershipComment = "Socks-VPS managed CN IPv4 set"
 	chainComment     = "Socks-VPS managed input chain"
 
 	minPort = 1024
@@ -82,9 +82,11 @@ func ParseCIDRs(reader io.Reader) ([]netip.Prefix, error) {
 	return prefixes, nil
 }
 
-// ClassifyExistingTable verifies the fixed ownership comment from
-// `nft --json list table ip socks_vps`. The caller handles the command's
-// not-found exit as TableAbsent without passing fabricated JSON here.
+// ClassifyExistingTable verifies the fixed comment on the cn_ipv4 set from
+// `nft --json list table ip socks_vps`. The set comment is the ownership
+// marker because nftables versions in supported Linux distributions do not
+// consistently include table or chain comments in JSON output. The caller
+// handles the command's not-found exit as TableAbsent without fabricating JSON.
 func ClassifyExistingTable(reader io.Reader) (TableState, error) {
 	if reader == nil {
 		return TableForeign, fmt.Errorf("classify existing nftables table: nil reader")
@@ -105,29 +107,45 @@ func ClassifyExistingTable(reader io.Reader) (TableState, error) {
 		return TableForeign, fmt.Errorf("decode nftables JSON trailing data: %w", err)
 	}
 
+	tablePresent := false
+	ownedSetPresent := false
 	for _, raw := range document.Nftables {
 		var object struct {
 			Table *struct {
+				Family string `json:"family"`
+				Name   string `json:"name"`
+			} `json:"table"`
+			Set *struct {
 				Family  string `json:"family"`
+				Table   string `json:"table"`
 				Name    string `json:"name"`
 				Comment string `json:"comment"`
-			} `json:"table"`
+			} `json:"set"`
 		}
 		if err := json.Unmarshal(raw, &object); err != nil {
 			return TableForeign, fmt.Errorf("decode nftables object: %w", err)
 		}
-		if object.Table == nil ||
-			object.Table.Family != TableFamily ||
-			object.Table.Name != TableName {
-			continue
+		if object.Table != nil &&
+			object.Table.Family == TableFamily &&
+			object.Table.Name == TableName {
+			tablePresent = true
 		}
-		if object.Table.Comment == OwnershipComment {
-			return TableOwned, nil
+		if object.Set != nil &&
+			object.Set.Family == TableFamily &&
+			object.Set.Table == TableName &&
+			object.Set.Name == SetName &&
+			object.Set.Comment == OwnershipComment {
+			ownedSetPresent = true
 		}
-		return TableForeign, nil
 	}
 
-	return TableForeign, ErrTableNotPresent
+	if !tablePresent {
+		return TableForeign, ErrTableNotPresent
+	}
+	if ownedSetPresent {
+		return TableOwned, nil
+	}
+	return TableForeign, nil
 }
 
 // Render writes one complete nft -f batch. TableAbsent creates the table.
@@ -167,7 +185,7 @@ func Render(writer io.Writer, port int, prefixes []netip.Prefix, state TableStat
 		"create table %s %s { comment %q; }\n\n",
 		TableFamily,
 		TableName,
-		OwnershipComment,
+		tableComment,
 	); err != nil {
 		return fmt.Errorf("render nftables table: %w", err)
 	}
@@ -192,7 +210,7 @@ func Render(writer io.Writer, port int, prefixes []netip.Prefix, state TableStat
 	if _, err := io.WriteString(writer, "\t};\n"); err != nil {
 		return fmt.Errorf("render nftables set closing: %w", err)
 	}
-	if _, err := fmt.Fprintf(writer, "\tcomment %q;\n}\n\n", setComment); err != nil {
+	if _, err := fmt.Fprintf(writer, "\tcomment %q;\n}\n\n", OwnershipComment); err != nil {
 		return fmt.Errorf("render nftables set comment: %w", err)
 	}
 

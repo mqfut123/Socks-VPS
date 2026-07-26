@@ -424,9 +424,17 @@ check_or_reselect_port() {
 }
 
 show_coexistence_state() {
+    local unit warp_status warp_units
+
     note 'Read-only coexistence check'
-    if ! systemctl list-unit-files 'warp-vps*' --no-legend --no-pager; then
-        printf 'Could not list WARP VPS Manager units.\n' >&2
+    if warp_units=$(systemctl list-unit-files 'warp-vps*' --no-legend --no-pager 2>&1); then
+        [[ -z ${warp_units} ]] || printf '%s\n' "${warp_units}"
+    else
+        warp_status=$?
+        if [[ ${warp_status} != 1 || -n ${warp_units} ]]; then
+            [[ -z ${warp_units} ]] || printf '%s\n' "${warp_units}" >&2
+            printf 'Could not list WARP VPS Manager units.\n' >&2
+        fi
     fi
     for unit in nftables.service firewalld.service ufw.service; do
         if systemctl is-active --quiet "${unit}"; then

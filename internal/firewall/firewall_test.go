@@ -137,8 +137,13 @@ func TestClassifyExistingTable(t *testing.T) {
 	owned := `{
 		"nftables": [
 			{"metainfo": {"json_schema_version": 1}},
-			{"table": {"family": "ip", "name": "socks_vps", "handle": 7, "comment": "Socks-VPS managed table"}},
-			{"set": {"family": "ip", "table": "socks_vps", "name": "cn_ipv4"}}
+			{"table": {"family": "ip", "name": "socks_vps", "handle": 7}},
+			{"set": {
+				"family": "ip",
+				"table": "socks_vps",
+				"name": "cn_ipv4",
+				"comment": "Socks-VPS managed CN IPv4 set"
+			}}
 		]
 	}`
 	state, err := ClassifyExistingTable(strings.NewReader(owned))
@@ -149,7 +154,21 @@ func TestClassifyExistingTable(t *testing.T) {
 		t.Fatalf("state = %v, want TableOwned", state)
 	}
 
-	foreign := `{"nftables":[{"table":{"family":"ip","name":"socks_vps","comment":"someone else"}}]}`
+	foreign := `{
+		"nftables": [
+			{"table": {
+				"family": "ip",
+				"name": "socks_vps",
+				"comment": "Socks-VPS managed table"
+			}},
+			{"set": {
+				"family": "ip",
+				"table": "socks_vps",
+				"name": "cn_ipv4",
+				"comment": "someone else"
+			}}
+		]
+	}`
 	state, err = ClassifyExistingTable(strings.NewReader(foreign))
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +187,47 @@ func TestClassifyExistingTableRejectsInvalidOrWrongListing(t *testing.T) {
 	wrong := `{"nftables":[{"table":{"family":"inet","name":"socks_vps","comment":"Socks-VPS managed table"}}]}`
 	if _, err := ClassifyExistingTable(strings.NewReader(wrong)); !errors.Is(err, ErrTableNotPresent) {
 		t.Fatalf("wrong listing error = %v, want ErrTableNotPresent", err)
+	}
+}
+
+func TestClassifyExistingTableRequiresExactSetMarker(t *testing.T) {
+	t.Parallel()
+
+	for name, set := range map[string]string{
+		"wrong family": `{
+			"family": "inet",
+			"table": "socks_vps",
+			"name": "cn_ipv4",
+			"comment": "Socks-VPS managed CN IPv4 set"
+		}`,
+		"wrong table": `{
+			"family": "ip",
+			"table": "other",
+			"name": "cn_ipv4",
+			"comment": "Socks-VPS managed CN IPv4 set"
+		}`,
+		"wrong name": `{
+			"family": "ip",
+			"table": "socks_vps",
+			"name": "other",
+			"comment": "Socks-VPS managed CN IPv4 set"
+		}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			document := `{
+				"nftables": [
+					{"table": {"family": "ip", "name": "socks_vps"}},
+					{"set": ` + set + `}
+				]
+			}`
+			state, err := ClassifyExistingTable(strings.NewReader(document))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state != TableForeign {
+				t.Fatalf("state = %v, want TableForeign", state)
+			}
+		})
 	}
 }
 

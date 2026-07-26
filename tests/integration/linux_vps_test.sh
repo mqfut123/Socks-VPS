@@ -310,12 +310,17 @@ drop_packet_count() {
 
     nft list chain ip socks_vps input |
         awk -v port="${port}" '
-            index($0, "tcp dport " port) && /counter packets/ {
+            index($0, "tcp dport " port) && /counter packets/ && !found {
                 for (field = 1; field <= NF; field++) {
                     if ($field == "packets" && $(field + 1) ~ /^[0-9]+$/) {
-                        print $(field + 1)
-                        exit
+                        packets = $(field + 1)
+                        found = 1
                     }
+                }
+            }
+            END {
+                if (found) {
+                    print packets
                 }
             }
         '

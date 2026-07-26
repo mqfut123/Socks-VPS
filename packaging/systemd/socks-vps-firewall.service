@@ -3,14 +3,15 @@ Description=Socks-VPS CN source firewall
 Documentation=@PROJECT_URL@
 After=nftables.service firewalld.service ufw.service
 Before=socks-vps.service
-PartOf=socks-vps.service
+PartOf=socks-vps.service nftables.service
 BindsTo=socks-vps.service
+ReloadPropagatedFrom=nftables.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/lib/socks-vps/current/scripts/firewall.sh apply
-ExecReload=/usr/local/lib/socks-vps/current/scripts/firewall.sh apply
+ExecReload=/usr/local/lib/socks-vps/current/scripts/firewall.sh reload
 ExecStop=/usr/local/lib/socks-vps/current/scripts/firewall.sh remove
 TimeoutStartSec=60s
 TimeoutStopSec=30s
