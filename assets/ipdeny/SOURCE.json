@@ -1,0 +1,11 @@
+{
+  "dataset": "IPdeny CN IPv4 aggregated zone",
+  "source_url": "https://www.ipdeny.com/ipblocks/data/aggregated/cn-aggregated.zone",
+  "copyright_url": "https://www.ipdeny.com/ipblocks/data/aggregated/Copyrights.txt",
+  "upstream_md5_url": "https://www.ipdeny.com/ipblocks/data/aggregated/MD5SUM",
+  "fetched_at": "2026-07-26T07:38:17Z",
+  "upstream_last_modified": "2026-07-25T10:20:59Z",
+  "upstream_md5": "000ae93bb7b74d6f37742ed58ec18a62",
+  "sha256": "3cd045ca0ccbcfcdfca52f8aa86e37073ba4b9dc6bca93b93634aac973138def",
+  "line_count": 5508
+}

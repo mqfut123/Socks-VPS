@@ -1,0 +1,37 @@
+[Unit]
+Description=Socks-VPS CN source firewall
+Documentation=@PROJECT_URL@
+After=nftables.service firewalld.service ufw.service
+Before=socks-vps.service
+PartOf=socks-vps.service
+BindsTo=socks-vps.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/socks-vps/current/scripts/firewall.sh apply
+ExecReload=/usr/local/lib/socks-vps/current/scripts/firewall.sh apply
+ExecStop=/usr/local/lib/socks-vps/current/scripts/firewall.sh remove
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+RuntimeDirectory=socks-vps
+RuntimeDirectoryMode=0750
+UMask=0027
+
+User=root
+Group=root
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native

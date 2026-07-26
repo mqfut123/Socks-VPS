@@ -1,0 +1,41 @@
+[Unit]
+Description=Socks-VPS IPv4 SOCKS5 service
+Documentation=@PROJECT_URL@
+Wants=network-online.target
+Requires=socks-vps-firewall.service
+After=network-online.target socks-vps-firewall.service
+StartLimitIntervalSec=30s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=socks-vps
+Group=socks-vps
+ExecStart=/usr/local/bin/socks-vps serve --config /etc/socks-vps/config.json
+Restart=on-failure
+RestartSec=2s
+RestartPreventExitStatus=64 78
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+UMask=0027
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
