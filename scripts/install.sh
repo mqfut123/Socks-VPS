@@ -3,18 +3,50 @@
 set +x
 set -Eeuo pipefail
 
-readonly script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-readonly package_root=$(cd -- "${script_dir}/.." && pwd -P)
+readonly script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+readonly script_dir=$(cd -- "$(dirname -- "${script_path}")" && pwd -P)
+
+resolve_package_root() {
+    local normal_root backup_target backup_release
+
+    normal_root=$(cd -- "${script_dir}/.." && pwd -P)
+    if [[ -x ${normal_root}/bin/socks-vps ]]; then
+        printf '%s\n' "${normal_root}"
+        return
+    fi
+    if [[ -x ${script_dir}/restore-runtime/bin/socks-vps ]]; then
+        printf '%s\n' "${script_dir}/restore-runtime"
+        return
+    fi
+    if [[ -x ${script_dir}/release/bin/socks-vps ]]; then
+        printf '%s\n' "${script_dir}/release"
+        return
+    fi
+    if [[ -L ${script_dir}/usr-local-lib-socks-vps/current ]]; then
+        backup_target=$(readlink "${script_dir}/usr-local-lib-socks-vps/current")
+        backup_release="${script_dir}/usr-local-lib-socks-vps/releases/${backup_target##*/}"
+        if [[ -x ${backup_release}/bin/socks-vps ]]; then
+            printf '%s\n' "${backup_release}"
+            return
+        fi
+    fi
+    printf '%s\n' "${normal_root}"
+}
+
+readonly package_root=$(resolve_package_root)
 readonly package_binary="${package_root}/bin/socks-vps"
 readonly package_version_file="${package_root}/VERSION"
 readonly package_target_file="${package_root}/TARGET"
+readonly latest_installer_url='@BOOTSTRAP_URL@'
 
 readonly config_dir=/etc/socks-vps
-readonly config_file="${config_dir}/config.json"
+readonly instances_dir="${config_dir}/instances"
+readonly legacy_config_file="${config_dir}/config.json"
 readonly install_root=/usr/local/lib/socks-vps
 readonly releases_dir="${install_root}/releases"
 readonly current_link="${install_root}/current"
 readonly public_binary=/usr/local/bin/socks-vps
+readonly control_binary=/usr/local/bin/socks-vpsctl
 readonly main_unit=/etc/systemd/system/socks-vps.service
 readonly firewall_unit=/etc/systemd/system/socks-vps-firewall.service
 readonly backup_root=/var/backups/socks-vps
@@ -117,37 +149,63 @@ check_package() {
     )
 }
 
-read_secret_pair() {
-    local prompt_username=${1:-'Username'}
+choose_port() {
+    local requested
 
-    IFS= read -r -p "${prompt_username}: " selected_username
-    IFS= read -r -s -p 'Password: ' selected_password
-    printf '\n'
+    IFS= read -r -p 'TCP port [Enter = random 1024-65535]: ' requested
+    if [[ -z ${requested} ]]; then
+        selected_port_mode=automatic
+        selected_port=$("${package_binary}" port-select)
+    else
+        selected_port_mode=manual
+        selected_port=${requested}
+    fi
 }
 
-choose_port() {
-    local choice requested
+choose_cn_access() {
+    local answer
 
-    printf 'Port selection:\n'
-    printf '  1) Automatic unused TCP port\n'
-    printf '  2) Specify a TCP port\n'
-    IFS= read -r -p 'Select [1]: ' choice
-    choice=${choice:-1}
-
-    case ${choice} in
-        1)
-            selected_port_mode=automatic
-            selected_port=$("${package_binary}" port-select)
+    IFS= read -r -p 'Block mainland China IPv4 TCP access? [Y/n]: ' answer
+    case ${answer:-y} in
+        y | Y | yes | YES | Yes)
+            selected_allow_cn=false
             ;;
-        2)
-            IFS= read -r -p 'TCP port (1024-65535): ' requested
-            selected_port_mode=manual
-            selected_port=${requested}
+        n | N | no | NO | No)
+            selected_allow_cn=true
             ;;
         *)
-            die 'invalid port selection'
+            die 'please answer y or n'
             ;;
     esac
+}
+
+generate_secret_pair() {
+    local descriptor
+
+    exec {descriptor}< <("${package_binary}" credentials-generate)
+    IFS= read -r -d '' selected_username <&"${descriptor}" ||
+        die 'could not generate a username'
+    IFS= read -r -d '' selected_password <&"${descriptor}" ||
+        die 'could not generate a password'
+    exec {descriptor}<&-
+}
+
+read_replacement_secret_pair() {
+    local requested_username requested_password
+    local generated_username generated_password descriptor
+
+    exec {descriptor}< <("${package_binary}" credentials-generate)
+    IFS= read -r -d '' generated_username <&"${descriptor}" ||
+        die 'could not generate a username'
+    IFS= read -r -d '' generated_password <&"${descriptor}" ||
+        die 'could not generate a password'
+    exec {descriptor}<&-
+
+    IFS= read -r -p 'New username [Enter = secure random]: ' requested_username
+    IFS= read -r -s -p 'New password [Enter = secure random]: ' requested_password
+    printf '\n'
+    selected_username=${requested_username:-${generated_username}}
+    selected_password=${requested_password:-${generated_password}}
 }
 
 check_new_config_without_write() {
@@ -155,16 +213,37 @@ check_new_config_without_write() {
     local version=$2
     local username=$3
     local password=$4
+    local allow_cn=$5
 
     printf '%s\0%s\0' "${username}" "${password}" |
         "${package_binary}" config-create \
             --check \
             --port "${port}" \
+            --allow-cn="${allow_cn}" \
             --version "${version}"
 }
 
 installation_exists() {
-    [[ -f ${config_file} && -L ${current_link} && -L ${public_binary} ]]
+    [[ (-d ${instances_dir} || -f ${legacy_config_file}) &&
+       -L ${current_link} &&
+       -L ${public_binary} ]]
+}
+
+installation_detected() {
+    local path
+
+    for path in \
+        "${config_dir}" \
+        "${install_root}" \
+        "${public_binary}" \
+        "${control_binary}" \
+        "${main_unit}" \
+        "${firewall_unit}"; do
+        if [[ -e ${path} || -L ${path} ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 show_status() {
@@ -182,10 +261,9 @@ show_status() {
         printf 'inactive\n'
     fi
 
-    if command -v nft >/dev/null 2>&1; then
-        if ! nft list table ip socks_vps; then
-            printf 'table ip socks_vps is not readable or is not loaded\n' >&2
-        fi
+    if [[ -d ${instances_dir} && -x ${public_binary} ]]; then
+        printf '\n'
+        list_instances
     fi
 }
 
@@ -193,11 +271,14 @@ choose_existing_action() {
     local choice
 
     printf 'Existing Socks-VPS installation detected.\n'
-    printf '  1) Status\n'
-    printf '  2) Update and preserve port and credentials\n'
-    printf '  3) Reinstall with new port and credentials\n'
-    printf '  4) Uninstall to a recoverable backup\n'
-    printf '  5) Cancel\n'
+    printf '  1) Status and SOCKS list\n'
+    printf '  2) Update\n'
+    printf '  3) Add a SOCKS\n'
+    printf '  4) Change credentials\n'
+    printf '  5) Remove a SOCKS\n'
+    printf '  6) Reinstall and replace all SOCKS configs\n'
+    printf '  7) Uninstall to a recoverable backup\n'
+    printf '  8) Cancel\n'
     IFS= read -r -p 'Select: ' choice
 
     case ${choice} in
@@ -206,25 +287,52 @@ choose_existing_action() {
             exit 0
             ;;
         2)
-            selected_action=update
+            if [[ $(readlink -f "${current_link}") == "${package_root}" ]]; then
+                run_latest_update
+            else
+                direct_update
+            fi
+            exit 0
+            ;;
+        3)
+            selected_action=add
+            choose_port
+            choose_cn_access
+            generate_secret_pair
+            ;;
+        4)
+            selected_action=credentials
+            selected_port_mode=preserve
+            selected_port=0
+            selected_allow_cn=false
+            select_instance_name ''
+            read_replacement_secret_pair
+            ;;
+        5)
+            selected_action=remove
             selected_port_mode=preserve
             selected_port=0
             selected_username=
             selected_password=
+            selected_allow_cn=false
+            select_instance_name ''
             ;;
-        3)
+        6)
             selected_action=reinstall
+            selected_instance_name=socks-1
             choose_port
-            read_secret_pair
+            choose_cn_access
+            generate_secret_pair
             ;;
-        4)
+        7)
             selected_action=uninstall
             selected_port_mode=preserve
             selected_port=0
             selected_username=
             selected_password=
+            selected_allow_cn=false
             ;;
-        5)
+        8)
             exit 0
             ;;
         *)
@@ -256,6 +364,7 @@ print_impact() {
         "${config_dir}" \
         "${install_root}" \
         "${public_binary}" \
+        "${control_binary}" \
         "${main_unit}" \
         "${firewall_unit}" \
         'systemd units: socks-vps.service, socks-vps-firewall.service' \
@@ -278,11 +387,21 @@ run_privileged() {
     local mode=$2
     local port=$3
     local version=$4
-    local username=$5
-    local password=$6
+    local allow_cn=$5
+    local instance_name=$6
+    local username=$7
+    local password=$8
 
     if [[ ${EUID} -eq 0 ]]; then
-        privileged_apply "${action}" "${mode}" "${port}" "${version}" "${username}" "${password}"
+        privileged_apply \
+            "${action}" \
+            "${mode}" \
+            "${port}" \
+            "${version}" \
+            "${allow_cn}" \
+            "${instance_name}" \
+            "${username}" \
+            "${password}"
         return
     fi
 
@@ -290,7 +409,13 @@ run_privileged() {
     sudo -v </dev/tty
     printf '%s\0%s\0' "${username}" "${password}" |
         sudo -- "${script_dir}/install.sh" \
-            --privileged-apply "${action}" "${mode}" "${port}" "${version}"
+            --privileged-apply \
+            "${action}" \
+            "${mode}" \
+            "${port}" \
+            "${version}" \
+            "${allow_cn}" \
+            "${instance_name}"
 }
 
 require_root() {
@@ -310,13 +435,21 @@ detect_package_manager() {
 }
 
 ensure_system_dependencies() {
+    local require_nft=${1:-true}
     local manager
     local need_nft=0
-    local need_ss=0
+    local need_iproute=0
+    local -a packages=()
 
-    command -v nft >/dev/null 2>&1 || need_nft=1
-    command -v ss >/dev/null 2>&1 || need_ss=1
-    if ((need_nft == 0 && need_ss == 0)); then
+    if [[ ${require_nft} == true ]] &&
+       ! command -v nft >/dev/null 2>&1; then
+        need_nft=1
+    fi
+    if ! command -v ss >/dev/null 2>&1 ||
+       ! command -v ip >/dev/null 2>&1; then
+        need_iproute=1
+    fi
+    if ((need_nft == 0 && need_iproute == 0)); then
         return
     fi
 
@@ -324,14 +457,20 @@ ensure_system_dependencies() {
     note "Installing required system packages with ${manager}"
     case ${manager} in
         apt)
+            ((need_nft == 0)) || packages+=(nftables)
+            ((need_iproute == 0)) || packages+=(iproute2)
             apt-get update
-            apt-get install -y nftables iproute2 ca-certificates
+            apt-get install -y "${packages[@]}"
             ;;
         dnf)
-            dnf install -y nftables iproute ca-certificates
+            ((need_nft == 0)) || packages+=(nftables)
+            ((need_iproute == 0)) || packages+=(iproute)
+            dnf install -y "${packages[@]}"
             ;;
         yum)
-            yum install -y nftables iproute ca-certificates
+            ((need_nft == 0)) || packages+=(nftables)
+            ((need_iproute == 0)) || packages+=(iproute)
+            yum install -y "${packages[@]}"
             ;;
     esac
 }
@@ -377,26 +516,82 @@ is_single_port_value() {
     [[ ${1:-} =~ ^[0-9]+$ ]]
 }
 
-current_service_owns_configured_listener() {
-    local configured_port main_pid output ports
+configured_ports() {
+    if [[ -d ${instances_dir} ]]; then
+        "${package_binary}" config-ports --config-dir "${instances_dir}"
+    elif [[ -f ${legacy_config_file} ]]; then
+        "${package_binary}" config-port --config "${legacy_config_file}"
+    else
+        return 1
+    fi
+}
 
-    "${public_binary}" self-check --config "${config_file}"
-    configured_port=$("${public_binary}" config-port --config "${config_file}")
-    is_single_port_value "${configured_port}" || return 1
+blocked_cn_ports() {
+    if [[ -d ${instances_dir} ]]; then
+        "${package_binary}" config-ports \
+            --config-dir "${instances_dir}" \
+            --blocked-cn-only
+    elif [[ -f ${legacy_config_file} ]]; then
+        "${package_binary}" config-port --config "${legacy_config_file}"
+    else
+        return 1
+    fi
+}
+
+configuration_requires_nft() {
+    configuration_tree_requires_nft "${config_dir}"
+}
+
+configuration_tree_requires_nft() {
+    local tree=$1
+    local ports
+
+    if [[ -d ${tree}/instances ]]; then
+        ports=$(
+            "${package_binary}" config-ports \
+                --config-dir "${tree}/instances" \
+                --blocked-cn-only
+        ) || return 1
+        [[ -n ${ports} ]]
+        return
+    fi
+    [[ -f ${tree}/config.json ]]
+}
+
+current_service_owns_configured_listener() {
+    local main_pid output expected_ports actual_ports
+
+    if [[ -d ${instances_dir} ]]; then
+        "${public_binary}" self-check --config-dir "${instances_dir}"
+        expected_ports=$(
+            "${public_binary}" config-ports --config-dir "${instances_dir}" |
+                LC_ALL=C sort -n
+        ) || return 1
+    else
+        "${public_binary}" self-check --config "${legacy_config_file}"
+        expected_ports=$(
+            "${public_binary}" config-port --config "${legacy_config_file}"
+        ) || return 1
+    fi
+    [[ -n ${expected_ports} ]] || return 1
     main_pid=$(systemctl show socks-vps.service --property=MainPID --value)
     [[ ${main_pid} =~ ^[1-9][0-9]*$ ]] || return 1
     output=$(ss -H -ltnp 2>/dev/null) || return 1
-    ports=$(printf '%s\n' "${output}" | owned_wildcard_listener_ports "${main_pid}")
-    [[ ${ports} == "${configured_port}" ]]
+    actual_ports=$(
+        printf '%s\n' "${output}" |
+            owned_wildcard_listener_ports "${main_pid}" |
+            LC_ALL=C sort -n
+    )
+    [[ ${actual_ports} == "${expected_ports}" ]]
 }
 
 check_or_reselect_port() {
     local mode=$1
     local port=$2
     local allow_current_owner=${3:-false}
-    local status
+    local status output
 
-    if "${package_binary}" port-check --port "${port}" >/dev/null; then
+    if output=$("${package_binary}" port-check --port "${port}" 2>&1); then
         printf '%s\n' "${port}"
         return 0
     else
@@ -411,6 +606,7 @@ check_or_reselect_port() {
             fi
             report_port_conflict "${port}"
         else
+            [[ -z ${output} ]] || printf '%s\n' "${output}" >&2
             printf 'Could not check TCP port %s (exit %s).\n' "${port}" "${status}" >&2
         fi
         return 1
@@ -442,19 +638,10 @@ show_coexistence_state() {
             printf 'Detected active firewall service: %s\n' "${unit}"
         fi
     done
-    printf '%s\n' 'IPv4 TCP listeners:'
-    ss -H -ltnp
-    printf '%s\n' 'Network interfaces:'
-    ip -brief link
-    printf '%s\n' 'IPv4 routes:'
-    ip -4 route show
-    printf '%s\n' 'IPv4 policy rules:'
-    ip -4 rule show
     if command -v nft >/dev/null 2>&1; then
         if nft list table inet warp_vps >/dev/null 2>&1; then
             printf 'Detected external nftables table: inet warp_vps (unchanged)\n'
         fi
-        nft list tables
     fi
 }
 
@@ -479,17 +666,27 @@ disable_recovery_error() {
 }
 
 preflight_firewall() {
-    local action=$1
-    local port_mode=$2
-    local selected_port=$3
+    local port_mode=$1
+    local selected_port=$2
+    local allow_cn=$3
     local tables
     local table_state=absent
+    local require_nft=false
     local -a render_args
 
-    if nft --json list table ip socks_vps >/dev/null 2>&1; then
-        if [[ ${action} == install ]]; then
-            die 'table ip socks_vps already exists; a fresh install cannot prove ownership'
+    if [[ ${port_mode} == preserve ]]; then
+        if configuration_requires_nft; then
+            require_nft=true
         fi
+    elif [[ ${allow_cn} == false ]]; then
+        require_nft=true
+    fi
+    if ! command -v nft >/dev/null 2>&1; then
+        [[ ${require_nft} == false ]] || die 'nft is required while CN blocking is enabled'
+        return 0
+    fi
+
+    if nft --json list table ip socks_vps >/dev/null 2>&1; then
         table_state=present
     else
         tables=$(nft list tables) || die 'could not inspect nftables tables'
@@ -504,9 +701,13 @@ preflight_firewall() {
         --output -
     )
     if [[ ${port_mode} == preserve ]]; then
-        render_args+=(--config "${config_file}")
+        if [[ -d ${instances_dir} ]]; then
+            render_args+=(--config-dir "${instances_dir}")
+        else
+            render_args+=(--config "${legacy_config_file}")
+        fi
     else
-        render_args+=(--port "${selected_port}")
+        render_args+=(--port "${selected_port}" --allow-cn="${allow_cn}")
     fi
     if [[ ${table_state} == present ]]; then
         render_args+=(--existing-table-json -)
@@ -521,9 +722,27 @@ preflight_firewall() {
 
 require_socks_table_absent() {
     local tables
+    local verify_dir=/run/socks-vps
+    local verify_json="${verify_dir}/verify-existing-table.json"
+    local verify_rules="${verify_dir}/verify-owned-table.nft"
 
-    if nft list table ip socks_vps >/dev/null 2>&1; then
-        die 'table ip socks_vps is still loaded'
+    if ! command -v nft >/dev/null 2>&1; then
+        if [[ -d ${instances_dir} || -f ${legacy_config_file} ]] &&
+           configuration_requires_nft; then
+            die 'nft is unavailable while a CN-blocked configuration exists'
+        fi
+        return 0
+    fi
+    install -d -m 0750 -o root -g root "${verify_dir}"
+    if nft --json list table ip socks_vps >"${verify_json}" 2>/dev/null; then
+        "${package_binary}" firewall-render \
+            --port 1024 \
+            --allow-cn=true \
+            --existing-table-json "${verify_json}" \
+            --output "${verify_rules}"
+        [[ ! -s ${verify_rules} ]] ||
+            die 'owned table ip socks_vps is still loaded'
+        return 0
     fi
     tables=$(nft list tables) || die 'could not verify nftables table removal'
     if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
@@ -548,31 +767,8 @@ stop_owned_services() {
 }
 
 validate_account() {
-    local passwd_entry group_entry account_group account_home account_shell
-    local group_members all_groups
-
-    if passwd_entry=$(getent passwd socks-vps); then
-        IFS=: read -r _ _ _ _ _ account_home account_shell <<<"${passwd_entry}"
-        group_entry=$(getent group socks-vps) || die 'socks-vps user exists without socks-vps group'
-        IFS=: read -r _ _ _ group_members <<<"${group_entry}"
-        account_group=$(id -gn socks-vps)
-        all_groups=$(id -Gn socks-vps)
-        [[ ${account_group} == socks-vps ]] || die 'existing socks-vps user has a different primary group'
-        [[ ${all_groups} == socks-vps ]] ||
-            die 'existing socks-vps user belongs to additional groups'
-        [[ -z ${group_members} ]] ||
-            die 'existing socks-vps group has supplemental members'
-        [[ ${account_home} == /nonexistent ]] || die 'existing socks-vps user has an unexpected home'
-        [[ ${account_shell} == */nologin || ${account_shell} == */false ]] ||
-            die 'existing socks-vps user has an interactive shell'
-        [[ -n ${group_entry} ]] || die 'existing socks-vps group is invalid'
-        return 0
-    fi
-
-    if getent group socks-vps >/dev/null; then
-        die 'socks-vps group already exists without the project user'
-    fi
-    return 1
+    getent passwd socks-vps >/dev/null &&
+        getent group socks-vps >/dev/null
 }
 
 check_fresh_account_conflicts() {
@@ -604,7 +800,11 @@ require_owned_installation() {
     installation_exists || die 'Socks-VPS ownership boundary is incomplete'
     [[ -f ${main_unit} && -f ${firewall_unit} ]] ||
         die 'Socks-VPS systemd unit ownership boundary is incomplete'
-    "${public_binary}" config-check --config "${config_file}"
+    if [[ -d ${instances_dir} ]]; then
+        "${package_binary}" config-check --config-dir "${instances_dir}"
+    else
+        "${package_binary}" config-check --config "${legacy_config_file}"
+    fi
     [[ $(readlink -f "${public_binary}") == "${install_root}/releases/"*"/bin/socks-vps" ]] ||
         die "${public_binary} does not point into the Socks-VPS release directory"
     [[ $(readlink -f "${current_link}") == "${install_root}/releases/"* ]] ||
@@ -617,6 +817,7 @@ check_fresh_path_conflicts() {
         "${config_dir}"
         "${install_root}"
         "${public_binary}"
+        "${control_binary}"
         "${main_unit}"
         "${firewall_unit}"
     )
@@ -646,7 +847,16 @@ backup_current_installation() {
     [[ ${current_target} == "${releases_dir}/"* && -x ${current_target}/bin/socks-vps ]] ||
         die 'current release target is outside the owned release tree'
     printf 'snapshot\n' >"${destination}/kind"
-    install -m 0640 -o root -g root "${config_file}" "${destination}/config.json"
+    if [[ -e ${control_binary} || -L ${control_binary} ]]; then
+        printf 'present\n' >"${destination}/control-state"
+    else
+        printf 'absent\n' >"${destination}/control-state"
+    fi
+    cp -a "${config_dir}" "${destination}/etc-socks-vps"
+    install -d -m 0700 -o root -g root "${destination}/restore-runtime/bin"
+    install -m 0755 -o root -g root \
+        "${package_binary}" \
+        "${destination}/restore-runtime/bin/socks-vps"
     install -m 0644 -o root -g root "${main_unit}" "${destination}/socks-vps.service"
     install -m 0644 -o root -g root "${firewall_unit}" "${destination}/socks-vps-firewall.service"
     install -m 0644 -o root -g root "${current_target}/VERSION" "${destination}/VERSION"
@@ -707,36 +917,68 @@ install_release_tree() {
 }
 
 create_new_config() {
-    local port=$1
-    local version=$2
-    local username=$3
-    local password=$4
-    local attempt=$5
-    local pending="${config_dir}/config.json.pending-${version}-${attempt}"
+    local name=$1
+    local port=$2
+    local version=$3
+    local username=$4
+    local password=$5
+    local allow_cn=$6
+    local attempt=$7
+    local target="${instances_dir}/${name}.json"
+    local pending="${instances_dir}/.${name}.pending-${version}-${attempt}"
 
+    [[ ${name} =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
+        die "invalid SOCKS config name: ${name}"
+    [[ ! -e ${target} ]] || die "SOCKS config already exists: ${name}"
     [[ ! -e ${pending} ]] || die "pending configuration already exists: ${pending}"
     printf '%s\0%s\0' "${username}" "${password}" |
         "${package_binary}" config-create \
             --port "${port}" \
+            --allow-cn="${allow_cn}" \
             --version "${version}" \
             --output "${pending}"
     chown root:socks-vps "${pending}"
     chmod 0640 "${pending}"
-    mv -T "${pending}" "${config_file}"
+    mv -T "${pending}" "${target}"
 }
 
-create_preserved_config() {
+create_preserved_configs() {
     local version=$1
-    local pending="${config_dir}/config.json.pending-${version}-preserve"
+    local source name pending
+    local -a sources
 
-    [[ ! -e ${pending} ]] || die "pending configuration already exists: ${pending}"
-    "${package_binary}" config-create \
-        --preserve "${config_file}" \
-        --version "${version}" \
-        --output "${pending}"
-    chown root:socks-vps "${pending}"
-    chmod 0640 "${pending}"
-    mv -T "${pending}" "${config_file}"
+    install -d -m 0750 -o root -g socks-vps "${instances_dir}"
+    if [[ -f ${legacy_config_file} ]]; then
+        pending="${instances_dir}/.socks-1.pending-${version}-migration"
+        [[ ! -e ${pending} && ! -e ${instances_dir}/socks-1.json ]] ||
+            die 'legacy migration target already exists'
+        "${package_binary}" config-create \
+            --preserve "${legacy_config_file}" \
+            --version "${version}" \
+            --output "${pending}"
+        chown root:socks-vps "${pending}"
+        chmod 0640 "${pending}"
+        mv -T "${pending}" "${instances_dir}/socks-1.json"
+        mv "${legacy_config_file}" "${legacy_config_file}.migrated-${version}"
+        return
+    fi
+
+    shopt -s nullglob
+    sources=("${instances_dir}"/*.json)
+    shopt -u nullglob
+    ((${#sources[@]} > 0)) || die 'no SOCKS configurations are installed'
+    for source in "${sources[@]}"; do
+        name=$(basename "${source}" .json)
+        pending="${instances_dir}/.${name}.pending-${version}-preserve"
+        [[ ! -e ${pending} ]] || die "pending configuration already exists: ${pending}"
+        "${package_binary}" config-create \
+            --preserve "${source}" \
+            --version "${version}" \
+            --output "${pending}"
+        chown root:socks-vps "${pending}"
+        chmod 0640 "${pending}"
+        mv -T "${pending}" "${source}"
+    done
 }
 
 activate_release() {
@@ -744,6 +986,7 @@ activate_release() {
 
     replace_symlink "${release_dir}" "${current_link}"
     replace_symlink "${current_link}/bin/socks-vps" "${public_binary}"
+    replace_symlink "${current_link}/scripts/install.sh" "${control_binary}"
     install -m 0644 -o root -g root \
         "${release_dir}/packaging/systemd/socks-vps.service" \
         "${main_unit}"
@@ -771,19 +1014,18 @@ verify_active_installation() {
     systemctl is-active --quiet socks-vps.service || return 1
     current_service_owns_configured_listener || return 1
     systemctl is-active --quiet socks-vps-firewall.service || return 1
-    nft --json list table ip socks_vps >/dev/null || return 1
+    if configuration_requires_nft; then
+        command -v nft >/dev/null 2>&1 || return 1
+        nft --json list table ip socks_vps >/dev/null || return 1
+    fi
     systemctl enable socks-vps.service
 }
 
 verify_started_port() {
     local port=$1
 
-    "${public_binary}" self-check --config "${config_file}" || return 1
-    [[ $("${public_binary}" config-port --config "${config_file}") == "${port}" ]] ||
-        return 1
-    current_service_owns_port "${port}" || return 1
-    systemctl is-active --quiet socks-vps-firewall.service || return 1
-    nft --json list table ip socks_vps >/dev/null
+    verify_active_installation || return 1
+    current_service_owns_port "${port}"
 }
 
 start_attempt_decision() {
@@ -804,9 +1046,11 @@ start_attempt_decision() {
 start_and_verify() {
     local port_mode=$1
     local version=$2
-    local username=$3
-    local password=$4
-    local port=$5
+    local name=$3
+    local username=$4
+    local password=$5
+    local allow_cn=$6
+    local port=$7
     local attempt=1
     local start_status verify_status exec_status decision
 
@@ -823,7 +1067,6 @@ start_and_verify() {
         fi
 
         if [[ ${start_status} == 0 && ${verify_status} == 0 ]]; then
-            systemctl enable socks-vps.service
             printf 'Socks-VPS %s is active on TCP port %s.\n' "${version}" "${port}"
             return 0
         fi
@@ -850,7 +1093,17 @@ start_and_verify() {
 
         note "Automatically selected port ${port} was claimed before bind; selecting another port"
         port=$("${package_binary}" port-select)
-        create_new_config "${port}" "${version}" "${username}" "${password}" "${attempt}"
+        mv \
+            "${instances_dir}/${name}.json" \
+            "${instances_dir}/.${name}.bind-failed-${attempt}"
+        create_new_config \
+            "${name}" \
+            "${port}" \
+            "${version}" \
+            "${username}" \
+            "${password}" \
+            "${allow_cn}" \
+            "${attempt}"
         attempt=$((attempt + 1))
     done
 }
@@ -887,12 +1140,15 @@ install_or_replace() {
     local port_mode=$2
     local requested_port=$3
     local version=$4
-    local username=$5
-    local password=$6
+    local allow_cn=$5
+    local name=$6
+    local username=$7
+    local password=$8
     local backup_dir=
     local release_dir
     local selected
     local allow_current_owner=false
+    local require_nft=false
 
     if [[ ${action} == install ]]; then
         check_fresh_path_conflicts
@@ -905,7 +1161,12 @@ install_or_replace() {
         die "version ${version} is already installed; use reinstall if replacement is required"
     fi
 
-    ensure_system_dependencies
+    if [[ ${action} != install ]] && configuration_requires_nft; then
+        require_nft=true
+    elif [[ ${action} != update && ${allow_cn} == false ]]; then
+        require_nft=true
+    fi
+    ensure_system_dependencies "${require_nft}"
     show_coexistence_state
 
     if [[ ${action} == install || ${action} == reinstall ]]; then
@@ -915,20 +1176,20 @@ install_or_replace() {
         selected=$(check_or_reselect_port \
             "${port_mode}" \
             "${requested_port}" \
-            "${allow_current_owner}") ||
+                "${allow_current_owner}") ||
             die 'selected port is unavailable'
         requested_port=${selected}
-        printf '%s\0%s\0' "${username}" "${password}" |
-            "${package_binary}" config-create \
-                --check \
-                --port "${requested_port}" \
-                --version "${version}"
+        check_new_config_without_write \
+            "${requested_port}" \
+            "${version}" \
+            "${username}" \
+            "${password}" \
+            "${allow_cn}"
     fi
 
-    preflight_firewall "${action}" "${port_mode}" "${requested_port}"
+    preflight_firewall "${port_mode}" "${requested_port}" "${allow_cn}"
 
     if [[ ${action} != install ]]; then
-        stop_owned_services
         new_backup_dir "${action}"
         backup_dir=${created_backup_dir}
         backup_current_installation "${backup_dir}"
@@ -936,6 +1197,7 @@ install_or_replace() {
         printf 'Socks-VPS snapshot saved to %s\n' "${backup_dir}"
         printf 'Recovery command: %s\n' \
             "$(print_recovery_command "${backup_dir}")"
+        stop_owned_services
     fi
 
     if [[ ${action} == install ]]; then
@@ -943,13 +1205,25 @@ install_or_replace() {
     fi
     install -d -m 0755 -o root -g root "${install_root}" "${releases_dir}"
     install -d -m 0750 -o root -g socks-vps "${config_dir}"
+    if [[ ${action} == reinstall ]]; then
+        mv "${config_dir}" "${backup_dir}/replaced-etc-socks-vps"
+        install -d -m 0750 -o root -g socks-vps "${config_dir}"
+    fi
+    install -d -m 0750 -o root -g socks-vps "${instances_dir}"
     install_release_tree "${version}" "${action}"
     release_dir=${installed_release_dir}
 
     if [[ ${action} == update ]]; then
-        create_preserved_config "${version}"
+        create_preserved_configs "${version}"
     else
-        create_new_config "${requested_port}" "${version}" "${username}" "${password}" 0
+        create_new_config \
+            "${name}" \
+            "${requested_port}" \
+            "${version}" \
+            "${username}" \
+            "${password}" \
+            "${allow_cn}" \
+            0
     fi
     activate_release "${release_dir}"
 
@@ -963,36 +1237,49 @@ install_or_replace() {
     start_and_verify \
         "${port_mode}" \
         "${version}" \
+        "${name}" \
         "${username}" \
         "${password}" \
+        "${allow_cn}" \
         "${requested_port}"
     disable_recovery_error
+    print_connection_details "${name}"
 }
 
 uninstall_to_backup() {
     local backup_dir
+    local require_nft=false
 
     require_owned_installation
-    validate_account || die 'Socks-VPS system account is missing'
-    ensure_system_dependencies
-    stop_owned_services
-    "${public_binary}" port-check --config "${config_file}"
-    if ! systemctl disable socks-vps.service; then
-        die 'could not disable socks-vps.service'
+    if configuration_requires_nft; then
+        require_nft=true
     fi
+    ensure_system_dependencies "${require_nft}"
 
     new_backup_dir uninstall
     backup_dir=${created_backup_dir}
 
-    install -d -m 0700 -o root -g root "${backup_dir}/units"
+    install -d -m 0700 -o root -g root \
+        "${backup_dir}/units" \
+        "${backup_dir}/restore-runtime/bin"
     printf 'uninstall\n' >"${backup_dir}/kind"
     install -m 0755 -o root -g root \
         "${package_root}/scripts/install.sh" \
         "${backup_dir}/restore.sh"
+    install -m 0755 -o root -g root \
+        "${package_binary}" \
+        "${backup_dir}/restore-runtime/bin/socks-vps"
     enable_recovery_error "${backup_dir}"
+    stop_owned_services
+    if ! systemctl disable socks-vps.service; then
+        die 'could not disable socks-vps.service'
+    fi
     mv "${config_dir}" "${backup_dir}/etc-socks-vps"
     mv "${install_root}" "${backup_dir}/usr-local-lib-socks-vps"
     mv "${public_binary}" "${backup_dir}/usr-local-bin-socks-vps"
+    if [[ -e ${control_binary} || -L ${control_binary} ]]; then
+        mv "${control_binary}" "${backup_dir}/usr-local-bin-socks-vpsctl"
+    fi
     mv "${main_unit}" "${backup_dir}/units/socks-vps.service"
     mv "${firewall_unit}" "${backup_dir}/units/socks-vps-firewall.service"
     systemctl daemon-reload
@@ -1099,36 +1386,63 @@ restore_owned_path() {
 
 restore_snapshot_backup() {
     local backup_dir=$1
-    local version restored_target
+    local version restored_target control_state
 
-    [[ -r ${backup_dir}/config.json ]] || die 'backup is missing config.json'
+    [[ -d ${backup_dir}/etc-socks-vps ]] ||
+        die 'backup is missing the configuration directory'
     [[ -r ${backup_dir}/socks-vps.service ]] || die 'backup is missing the main unit'
     [[ -r ${backup_dir}/socks-vps-firewall.service ]] || die 'backup is missing the firewall unit'
     [[ -r ${backup_dir}/VERSION ]] || die 'backup is missing VERSION'
+    [[ -r ${backup_dir}/control-state ]] ||
+        die 'backup is missing the control command state'
     [[ -x ${backup_dir}/release/bin/socks-vps ]] ||
         die 'backup is missing the saved release binary'
+    [[ -x ${backup_dir}/restore-runtime/bin/socks-vps ]] ||
+        die 'backup is missing the restore runtime'
     [[ -r ${backup_dir}/release/assets/ipdeny/cn-aggregated.zone ]] ||
         die 'backup is missing the saved firewall source data'
     IFS= read -r version <"${backup_dir}/VERSION" || die 'could not read backup VERSION'
+    IFS= read -r control_state <"${backup_dir}/control-state" ||
+        die 'could not read the control command state'
+    [[ ${control_state} == present || ${control_state} == absent ]] ||
+        die 'backup has an invalid control command state'
     [[ $(<"${backup_dir}/release/VERSION") == "${version}" ]] ||
         die 'saved release VERSION does not match the backup'
 
-    require_owned_installation
+    [[ -L ${current_link} && -L ${public_binary} &&
+       -f ${main_unit} && -f ${firewall_unit} ]] ||
+        die 'current Socks-VPS runtime paths are incomplete'
     validate_account || die 'Socks-VPS system account is missing'
-    ensure_system_dependencies
+    if configuration_tree_requires_nft "${backup_dir}/etc-socks-vps"; then
+        ensure_system_dependencies true
+    else
+        ensure_system_dependencies false
+    fi
     stop_owned_services
 
     restored_target="${releases_dir}/${version}-restored-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     [[ ! -e ${restored_target} ]] ||
         die "restore release target already exists: ${restored_target}"
     cp -a "${backup_dir}/release" "${restored_target}"
-    install -m 0640 -o root -g socks-vps "${backup_dir}/config.json" "${config_file}"
+    if [[ -e ${config_dir} ]]; then
+        mv \
+            "${config_dir}" \
+            "${backup_dir}/failed-etc-socks-vps-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    fi
+    cp -a "${backup_dir}/etc-socks-vps" "${config_dir}"
     install -m 0644 -o root -g root "${backup_dir}/socks-vps.service" "${main_unit}"
     install -m 0644 -o root -g root \
         "${backup_dir}/socks-vps-firewall.service" \
         "${firewall_unit}"
     replace_symlink "${restored_target}" "${current_link}"
     replace_symlink "${current_link}/bin/socks-vps" "${public_binary}"
+    if [[ ${control_state} == present ]]; then
+        replace_symlink "${current_link}/scripts/install.sh" "${control_binary}"
+    elif [[ -e ${control_binary} || -L ${control_binary} ]]; then
+        mv \
+            "${control_binary}" \
+            "${backup_dir}/failed-usr-local-bin-socks-vpsctl-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    fi
     systemctl daemon-reload
     start_preserved_and_verify
 }
@@ -1136,27 +1450,43 @@ restore_snapshot_backup() {
 restore_uninstall_backup() {
     local backup_dir=$1
 
+    [[ -x ${backup_dir}/restore-runtime/bin/socks-vps ]] ||
+        die 'backup is missing the restore runtime'
     validate_restore_pair \
         "${backup_dir}/etc-socks-vps" "${config_dir}" directory
     validate_restore_pair \
         "${backup_dir}/usr-local-lib-socks-vps" "${install_root}" directory
     validate_restore_pair \
         "${backup_dir}/usr-local-bin-socks-vps" "${public_binary}" symlink
+    if path_exists "${backup_dir}/usr-local-bin-socks-vpsctl" ||
+       path_exists "${control_binary}"; then
+        validate_restore_pair \
+            "${backup_dir}/usr-local-bin-socks-vpsctl" "${control_binary}" symlink
+    fi
     validate_restore_pair \
         "${backup_dir}/units/socks-vps.service" "${main_unit}" file
     validate_restore_pair \
         "${backup_dir}/units/socks-vps-firewall.service" "${firewall_unit}" file
     validate_account || die 'Socks-VPS system account is missing'
-    ensure_system_dependencies
+    if configuration_tree_requires_nft "${backup_dir}/etc-socks-vps"; then
+        ensure_system_dependencies true
+    else
+        ensure_system_dependencies false
+    fi
     if systemctl is-active --quiet socks-vps.service ||
        systemctl is-active --quiet socks-vps-firewall.service; then
         die 'a Socks-VPS service is active while its owned files are absent'
     fi
-    require_socks_table_absent
 
     restore_owned_path "${backup_dir}/etc-socks-vps" "${config_dir}"
     restore_owned_path "${backup_dir}/usr-local-lib-socks-vps" "${install_root}"
     restore_owned_path "${backup_dir}/usr-local-bin-socks-vps" "${public_binary}"
+    if path_exists "${backup_dir}/usr-local-bin-socks-vpsctl" ||
+       path_exists "${control_binary}"; then
+        restore_owned_path \
+            "${backup_dir}/usr-local-bin-socks-vpsctl" \
+            "${control_binary}"
+    fi
     restore_owned_path "${backup_dir}/units/socks-vps.service" "${main_unit}"
     restore_owned_path \
         "${backup_dir}/units/socks-vps-firewall.service" \
@@ -1192,13 +1522,276 @@ restore_backup() {
     printf 'Socks-VPS restored from %s\n' "${backup_dir}"
 }
 
+read_config_detail() {
+    local path=$1
+    local descriptor
+
+    exec {descriptor}< <("${package_binary}" config-detail --config "${path}")
+    IFS= read -r -d '' detail_port <&"${descriptor}" ||
+        die "could not read port from ${path}"
+    IFS= read -r -d '' detail_username <&"${descriptor}" ||
+        die "could not read username from ${path}"
+    IFS= read -r -d '' detail_password <&"${descriptor}" ||
+        die "could not read password from ${path}"
+    IFS= read -r -d '' detail_allow_cn <&"${descriptor}" ||
+        die "could not read CN access setting from ${path}"
+    exec {descriptor}<&-
+}
+
+list_instances() {
+    local path name cn_text
+    local -a paths
+
+    shopt -s nullglob
+    paths=("${instances_dir}"/*.json)
+    shopt -u nullglob
+    ((${#paths[@]} > 0)) || die 'no SOCKS configurations are installed'
+
+    printf '%-18s %-8s %-10s\n' 'CONFIG' 'PORT' 'CN BLOCK'
+    for path in "${paths[@]}"; do
+        name=$(basename "${path}" .json)
+        read_config_detail "${path}"
+        if [[ ${detail_allow_cn} == true ]]; then
+            cn_text=disabled
+        else
+            cn_text=enabled
+        fi
+        printf '%-18s %-8s %-10s\n' "${name}" "${detail_port}" "${cn_text}"
+    done
+}
+
+select_instance_name() {
+    local requested=${1:-}
+    local path
+    local -a paths
+
+    if [[ -n ${requested} ]]; then
+        [[ ${requested} =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
+            die "invalid SOCKS config name: ${requested}"
+        [[ -f ${instances_dir}/${requested}.json ]] ||
+            die "SOCKS config does not exist: ${requested}"
+        selected_instance_name=${requested}
+        return
+    fi
+
+    shopt -s nullglob
+    paths=("${instances_dir}"/*.json)
+    shopt -u nullglob
+    ((${#paths[@]} > 0)) || die 'no SOCKS configurations are installed'
+    if ((${#paths[@]} == 1)); then
+        selected_instance_name=$(basename "${paths[0]}" .json)
+        return
+    fi
+
+    list_instances
+    IFS= read -r -p 'Config name: ' requested
+    [[ ${requested} =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
+        die 'invalid SOCKS config name'
+    path="${instances_dir}/${requested}.json"
+    [[ -f ${path} ]] || die "SOCKS config does not exist: ${requested}"
+    selected_instance_name=${requested}
+}
+
+next_instance_name() {
+    local number=1
+
+    while [[ -e ${instances_dir}/socks-${number}.json ]]; do
+        number=$((number + 1))
+    done
+    printf 'socks-%s\n' "${number}"
+}
+
+detect_server_ipv4() {
+    local address
+
+    if command -v curl >/dev/null 2>&1; then
+        address=$(
+            curl --fail --silent --show-error --location \
+                --ipv4 --max-time 2 https://api.ipify.org 2>/dev/null || :
+        )
+    fi
+    if [[ -z ${address:-} ]] && command -v ip >/dev/null 2>&1; then
+        address=$(
+            ip -4 route get 1.1.1.1 2>/dev/null |
+                sed -n 's/.* src \([0-9.][0-9.]*\).*/\1/p' |
+                head -n 1
+        )
+    fi
+    [[ ${address:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        address='check your VPS public IPv4'
+    printf '%s\n' "${address}"
+}
+
+print_connection_details() {
+    local name=$1
+    local server_ip cn_text
+
+    read_config_detail "${instances_dir}/${name}.json"
+    server_ip=$(detect_server_ipv4)
+    if [[ ${detail_allow_cn} == true ]]; then
+        cn_text=disabled
+    else
+        cn_text=enabled
+    fi
+
+    printf '\nSocks-VPS is ready.\n\n'
+    printf '  %-10s %s\n' 'Server IP' "${server_ip}"
+    printf '  %-10s %s\n' 'Port' "${detail_port}"
+    printf '  %-10s %s\n' 'Username' "${detail_username}"
+    printf '  %-10s %s\n' 'Password' "${detail_password}"
+    printf '  %-10s %s\n' 'Config' "${name}"
+    printf '  %-10s %s\n' 'CN block' "${cn_text}"
+    printf '\n'
+}
+
+snapshot_for_change() {
+    local purpose=$1
+
+    new_backup_dir "${purpose}"
+    backup_current_installation "${created_backup_dir}"
+    printf 'Recovery snapshot: %s\n' "${created_backup_dir}"
+    enable_recovery_error "${created_backup_dir}"
+}
+
+add_instance() {
+    local port_mode=$1
+    local requested_port=$2
+    local version=$3
+    local allow_cn=$4
+    local username=$5
+    local password=$6
+    local name selected require_nft=false
+
+    require_owned_installation
+    [[ -d ${instances_dir} ]] ||
+        die 'update Socks-VPS before adding another SOCKS config'
+    name=$(next_instance_name)
+    if configuration_requires_nft || [[ ${allow_cn} == false ]]; then
+        require_nft=true
+    fi
+    ensure_system_dependencies "${require_nft}"
+    selected=$(check_or_reselect_port "${port_mode}" "${requested_port}") ||
+        die 'selected port is unavailable'
+    check_new_config_without_write \
+        "${selected}" "${version}" "${username}" "${password}" "${allow_cn}"
+    preflight_firewall "${port_mode}" "${selected}" "${allow_cn}"
+    snapshot_for_change add
+    stop_owned_services
+    create_new_config \
+        "${name}" \
+        "${selected}" \
+        "${version}" \
+        "${username}" \
+        "${password}" \
+        "${allow_cn}" \
+        0
+    start_and_verify \
+        "${port_mode}" \
+        "${version}" \
+        "${name}" \
+        "${username}" \
+        "${password}" \
+        "${allow_cn}" \
+        "${selected}"
+    disable_recovery_error
+    print_connection_details "${name}"
+}
+
+change_instance_credentials() {
+    local name=$1
+    local version=$2
+    local username=$3
+    local password=$4
+    local target pending require_nft=false
+
+    require_owned_installation
+    [[ -d ${instances_dir} ]] ||
+        die 'update Socks-VPS before changing credentials with socks-vpsctl'
+    target="${instances_dir}/${name}.json"
+    [[ -f ${target} ]] || die "SOCKS config does not exist: ${name}"
+    read_config_detail "${target}"
+    check_new_config_without_write \
+        "${detail_port}" \
+        "${version}" \
+        "${username}" \
+        "${password}" \
+        "${detail_allow_cn}"
+    if configuration_requires_nft; then
+        require_nft=true
+    fi
+    ensure_system_dependencies "${require_nft}"
+    snapshot_for_change credentials
+    stop_owned_services
+
+    pending="${instances_dir}/.${name}.credentials-${version}-$$"
+    [[ ! -e ${pending} ]] || die "pending configuration already exists: ${pending}"
+    printf '%s\0%s\0' "${username}" "${password}" |
+        "${package_binary}" config-create \
+            --port "${detail_port}" \
+            --allow-cn="${detail_allow_cn}" \
+            --version "${version}" \
+            --output "${pending}"
+    chown root:socks-vps "${pending}"
+    chmod 0640 "${pending}"
+    mv -T "${pending}" "${target}"
+    start_preserved_and_verify
+    disable_recovery_error
+    print_connection_details "${name}"
+}
+
+remove_instance() {
+    local name=$1
+    local target
+    local -a paths
+    local require_nft=false
+
+    require_owned_installation
+    [[ -d ${instances_dir} ]] ||
+        die 'update Socks-VPS before removing a SOCKS config'
+    shopt -s nullglob
+    paths=("${instances_dir}"/*.json)
+    shopt -u nullglob
+    ((${#paths[@]} > 1)) ||
+        die 'the last SOCKS config cannot be removed; use socks-vpsctl uninstall'
+    target="${instances_dir}/${name}.json"
+    [[ -f ${target} ]] || die "SOCKS config does not exist: ${name}"
+    if configuration_requires_nft; then
+        require_nft=true
+    fi
+    ensure_system_dependencies "${require_nft}"
+    snapshot_for_change remove
+    stop_owned_services
+    mv "${target}" "${created_backup_dir}/removed-${name}.json"
+    start_preserved_and_verify
+    disable_recovery_error
+    printf 'Removed SOCKS config %s.\n\n' "${name}"
+    list_instances
+}
+
+run_latest_update() {
+    local work_dir bootstrap
+
+    [[ ${latest_installer_url} == https://* ]] ||
+        die 'this source checkout has no public update URL; use a release package'
+    require_command curl
+    work_dir=$(mktemp -d "${TMPDIR:-/tmp}/socks-vps-update.XXXXXXXX")
+    bootstrap="${work_dir}/install.sh"
+    curl --fail --silent --show-error --location \
+        --proto '=https' --tlsv1.2 \
+        --output "${bootstrap}" \
+        "${latest_installer_url}"
+    exec bash "${bootstrap}" --update
+}
+
 privileged_apply() {
     local action=$1
     local port_mode=$2
     local port=$3
     local version=$4
-    local username=$5
-    local password=$6
+    local allow_cn=$5
+    local instance_name=$6
+    local username=$7
+    local password=$8
 
     require_root
     check_package "${version}"
@@ -1210,8 +1803,29 @@ privileged_apply() {
                 "${port_mode}" \
                 "${port}" \
                 "${version}" \
+                "${allow_cn}" \
+                "${instance_name}" \
                 "${username}" \
                 "${password}"
+            ;;
+        add)
+            add_instance \
+                "${port_mode}" \
+                "${port}" \
+                "${version}" \
+                "${allow_cn}" \
+                "${username}" \
+                "${password}"
+            ;;
+        credentials)
+            change_instance_credentials \
+                "${instance_name}" \
+                "${version}" \
+                "${username}" \
+                "${password}"
+            ;;
+        remove)
+            remove_instance "${instance_name}"
             ;;
         uninstall)
             uninstall_to_backup
@@ -1227,12 +1841,22 @@ privileged_entry() {
     local port_mode=$2
     local port=$3
     local version=$4
+    local allow_cn=$5
+    local instance_name=$6
     local username password
 
     require_root
     IFS= read -r -d '' username || die 'privileged input is missing username'
     IFS= read -r -d '' password || die 'privileged input is missing password'
-    privileged_apply "${action}" "${port_mode}" "${port}" "${version}" "${username}" "${password}"
+    privileged_apply \
+        "${action}" \
+        "${port_mode}" \
+        "${port}" \
+        "${version}" \
+        "${allow_cn}" \
+        "${instance_name}" \
+        "${username}" \
+        "${password}"
 }
 
 interactive_main() {
@@ -1243,51 +1867,195 @@ interactive_main() {
 
     if installation_exists; then
         choose_existing_action
+    elif installation_detected; then
+        die 'partial or foreign Socks-VPS paths were detected; inspect the project paths before installing'
     else
         selected_action=install
+        selected_instance_name=socks-1
         choose_port
-        read_secret_pair
+        choose_cn_access
+        generate_secret_pair
     fi
 
-    if [[ ${selected_action} == install || ${selected_action} == reinstall ]]; then
+    if [[ ${selected_action} == install ||
+          ${selected_action} == reinstall ||
+          ${selected_action} == add ]]; then
         check_new_config_without_write \
             "${selected_port}" \
             "${version}" \
             "${selected_username}" \
-            "${selected_password}"
+            "${selected_password}" \
+            "${selected_allow_cn}"
     fi
 
-    print_impact "${selected_action}" "${version}"
-    confirm_action
+    if [[ ${selected_action} == uninstall ]]; then
+        print_impact uninstall "${version}"
+        confirm_action
+    fi
     run_privileged \
         "${selected_action}" \
         "${selected_port_mode}" \
         "${selected_port}" \
         "${version}" \
+        "${selected_allow_cn}" \
+        "${selected_instance_name:-}" \
         "${selected_username}" \
         "${selected_password}"
 }
 
+direct_update() {
+    local version installed_version_file installed_version
+
+    version=$(read_package_version)
+    check_package "${version}"
+    installation_exists || die 'Socks-VPS is not installed'
+    installed_version_file="$(readlink -f "${current_link}")/VERSION"
+    if [[ -r ${installed_version_file} ]]; then
+        IFS= read -r installed_version <"${installed_version_file}" ||
+            die 'could not read the installed version'
+        if [[ ${installed_version} == "${version}" ]]; then
+            printf 'Socks-VPS %s is already current.\n' "${version}"
+            return
+        fi
+    fi
+    run_privileged update preserve 0 "${version}" false '' '' ''
+}
+
+direct_add() {
+    local version
+
+    version=$(read_package_version)
+    check_package "${version}"
+    installation_exists || die 'Socks-VPS is not installed'
+    choose_port
+    choose_cn_access
+    generate_secret_pair
+    check_new_config_without_write \
+        "${selected_port}" \
+        "${version}" \
+        "${selected_username}" \
+        "${selected_password}" \
+        "${selected_allow_cn}"
+    run_privileged \
+        add \
+        "${selected_port_mode}" \
+        "${selected_port}" \
+        "${version}" \
+        "${selected_allow_cn}" \
+        '' \
+        "${selected_username}" \
+        "${selected_password}"
+}
+
+direct_credentials() {
+    local requested=${1:-}
+    local version
+
+    version=$(read_package_version)
+    check_package "${version}"
+    installation_exists || die 'Socks-VPS is not installed'
+    select_instance_name "${requested}"
+    read_replacement_secret_pair
+    run_privileged \
+        credentials \
+        preserve \
+        0 \
+        "${version}" \
+        false \
+        "${selected_instance_name}" \
+        "${selected_username}" \
+        "${selected_password}"
+}
+
+direct_remove() {
+    local requested=${1:-}
+    local version
+
+    version=$(read_package_version)
+    check_package "${version}"
+    installation_exists || die 'Socks-VPS is not installed'
+    select_instance_name "${requested}"
+    run_privileged \
+        remove \
+        preserve \
+        0 \
+        "${version}" \
+        false \
+        "${selected_instance_name}" \
+        '' \
+        ''
+}
+
+direct_uninstall() {
+    local version
+
+    version=$(read_package_version)
+    check_package "${version}"
+    installation_exists || die 'Socks-VPS is not installed'
+    print_impact uninstall "${version}"
+    confirm_action
+    run_privileged uninstall preserve 0 "${version}" false '' '' ''
+}
+
+ensure_root_entry() {
+    if [[ ${EUID} -eq 0 ]]; then
+        return
+    fi
+    require_command sudo
+    exec sudo -- "${script_path}" "$@"
+}
+
 main() {
+    ensure_root_entry "$@"
+
     case ${1:-} in
         '')
             interactive_main
             ;;
+        list | --list)
+            [[ $# -eq 1 ]] || die 'usage: socks-vpsctl list'
+            installation_exists || die 'Socks-VPS is not installed'
+            list_instances
+            ;;
+        status | --status)
+            [[ $# -eq 1 ]] || die 'usage: socks-vpsctl status'
+            show_status
+            ;;
+        add)
+            [[ $# -eq 1 ]] || die 'usage: socks-vpsctl add'
+            direct_add
+            ;;
+        credentials)
+            [[ $# -le 2 ]] || die 'usage: socks-vpsctl credentials [CONFIG]'
+            direct_credentials "${2:-}"
+            ;;
+        remove)
+            [[ $# -le 2 ]] || die 'usage: socks-vpsctl remove [CONFIG]'
+            direct_remove "${2:-}"
+            ;;
+        update)
+            [[ $# -eq 1 ]] || die 'usage: socks-vpsctl update'
+            run_latest_update
+            ;;
+        --update)
+            [[ $# -eq 1 ]] || die 'usage: install.sh --update'
+            direct_update
+            ;;
+        uninstall)
+            [[ $# -eq 1 ]] || die 'usage: socks-vpsctl uninstall'
+            direct_uninstall
+            ;;
         --privileged-apply)
-            [[ $# -eq 5 ]] || die 'invalid privileged invocation'
-            privileged_entry "$2" "$3" "$4" "$5"
+            [[ $# -eq 7 ]] || die 'invalid privileged invocation'
+            privileged_entry "$2" "$3" "$4" "$5" "$6" "$7"
             ;;
         --restore)
             [[ $# -eq 2 ]] || die 'usage: install.sh --restore BACKUP_DIR'
             require_root
             restore_backup "$2"
             ;;
-        --status)
-            [[ $# -eq 1 ]] || die 'usage: install.sh --status'
-            show_status
-            ;;
         *)
-            die 'usage: install.sh [--status|--restore BACKUP_DIR]'
+            die 'usage: socks-vpsctl {list|status|add|credentials [CONFIG]|remove [CONFIG]|update|uninstall}'
             ;;
     esac
 }

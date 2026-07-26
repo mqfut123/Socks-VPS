@@ -1,9 +1,9 @@
 [Unit]
 Description=Socks-VPS IPv4 SOCKS5 service
 Documentation=@PROJECT_URL@
-Wants=network-online.target
+Wants=network.target
 Requires=socks-vps-firewall.service
-After=network-online.target socks-vps-firewall.service
+After=network.target socks-vps-firewall.service
 StartLimitIntervalSec=30s
 StartLimitBurst=3
 
@@ -11,7 +11,7 @@ StartLimitBurst=3
 Type=simple
 User=socks-vps
 Group=socks-vps
-ExecStart=/usr/local/bin/socks-vps serve --config /etc/socks-vps/config.json
+ExecStart=/usr/local/bin/socks-vps serve --config-dir /etc/socks-vps/instances
 Restart=on-failure
 RestartSec=2s
 RestartPreventExitStatus=64 78

@@ -1,187 +1,124 @@
 # Socks-VPS
 
+一个命令，把 Linux VPS 变成轻量、独立、可管理的 IPv4 SOCKS5 出口。
+
 ```bash
-bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/download/v1.0.4/install-v1.0.4.sh)
+bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download/install.sh)
 ```
 
-| | Socks-VPS | 通用 SOCKS 安装脚本 |
-|---|---|---|
-| 协议边界 | SOCKS5、TCP `CONNECT`、全链路 IPv4 | 通常同时开启多种协议 |
-| 中国大陆来源 | 在 TCP 握手前由独立 nftables 表丢弃 | 常在应用层拒绝或不限制 |
-| 规则交付 | CN aggregated 数据随同一版本包交付 | 可能在 VPS 上另行下载 |
-| 共存 | 只管理 `socks-vps` 自有资源 | 取决于脚本 |
+安装只问两件事：
 
-Socks-VPS 是运行在 Linux VPS 上的标准 SOCKS5 服务。它监听
-`0.0.0.0`，只接受 RFC 1929 用户名/密码认证和 TCP `CONNECT`，只连接
-公网 IPv4 目标。IPv6、UDP、私网、本机地址、链路本地地址、云元数据和
-IANA 特殊用途 IPv4 目标会被拒绝。
+```text
+TCP port [Enter = random 1024-65535]:
+Block mainland China IPv4 TCP access? [Y/n]:
+```
 
-初版目标、已确认方案和验收边界记录在
-[`docs/initial-baseline.md`](https://github.com/mqfut123/Socks-VPS/blob/main/docs/initial-baseline.md)。
+连续两次回车，Socks-VPS 会选择一个未占用端口，默认阻断中国大陆来源，并生成 20 位安全用户名和密码。完成后直接显示连接信息：
 
-## 支持环境
+```text
+Socks-VPS is ready.
 
-- 使用 systemd 的 Linux。
-- APT、DNF 或 YUM 软件包管理器。
-- `amd64` 和 `arm64`。
-- nftables。
-- 可用的 IPv4 DNS 服务器；域名目标只查询 `A` 记录。
+  Server IP  203.0.113.10
+  Port       45826
+  Username   2mX7rQ9vK4cN8pL5tH3s
+  Password   qP9kD2wR7xM4bV8nC5zT
+  Config     socks-1
+  CN block   enabled
+```
 
-安装器在收齐端口、用户名和密码后才请求 root 权限并修改系统。自动端口
-只从当前可绑定的 `1024–65535/TCP` 中选择；用户指定的端口若已占用，
-安装停止并显示占用进程，不会修改端口或停止现有服务。
+## 一个进程，多个 SOCKS
+
+每个 SOCKS 使用独立配置文件，所有配置由同一个轻量进程统一运行。增加节点不会复制一套服务和防火墙。
+
+```bash
+sudo socks-vpsctl list
+sudo socks-vpsctl add
+sudo socks-vpsctl credentials socks-1
+sudo socks-vpsctl remove socks-2
+```
+
+`add` 同样只问端口和大陆阻断选项，并自动生成新凭据。`credentials` 可以自行输入新用户名和密码，任一字段直接回车则重新生成 20 位安全值。
+
+## 为什么用 Socks-VPS
+
+| | Socks-VPS |
+|---|---|
+| 运行方式 | 单个 Go 二进制、单个 systemd 服务 |
+| 多配置 | 一个进程监听多个独立 SOCKS 配置 |
+| 协议 | SOCKS5 用户名/密码认证、TCP `CONNECT` |
+| 网络边界 | 仅监听和连接 IPv4 |
+| 默认凭据 | 安全随机用户名和密码，各 20 字符 |
+| 大陆阻断 | 可选，默认开启，在 TCP 握手前由 nftables 丢弃 |
+| 生命周期 | 开机自启，异常退出由 systemd 自动重启 |
+| 资源所有权 | 只管理 Socks-VPS 自有配置、服务和 nftables 表 |
+
+它只接受公网 IPv4 目标。IPv6、UDP、BIND、私网、回环、本机地址、链路本地地址、云元数据和 IANA 特殊用途地址会被拒绝。
 
 ## 管理
 
-再次运行公开安装命令会进入状态、更新、重装和卸载菜单。安装后也可直接
-运行同一管理入口：
-
 ```bash
-/usr/local/lib/socks-vps/current/scripts/install.sh
+# 查看服务和全部配置
+sudo socks-vpsctl status
+sudo socks-vpsctl list
+
+# 新增一个 SOCKS
+sudo socks-vpsctl add
+
+# 修改凭据
+sudo socks-vpsctl credentials socks-1
+
+# 删除一个配置
+sudo socks-vpsctl remove socks-2
+
+# 更新到最新版本
+sudo socks-vpsctl update
+
+# 可恢复卸载
+sudo socks-vpsctl uninstall
 ```
 
-只读状态：
+不带参数运行 `sudo socks-vpsctl` 也可以使用交互菜单。最后一个 SOCKS 配置不会被单独删除，需要时请使用 `uninstall`。
+
+服务仍可用标准 systemd 命令管理：
 
 ```bash
-/usr/local/lib/socks-vps/current/scripts/install.sh --status
-```
-
-服务管理：
-
-```bash
-sudo systemctl start socks-vps.service
-sudo systemctl stop socks-vps.service
 sudo systemctl restart socks-vps.service
+sudo systemctl stop socks-vps.service
+sudo systemctl start socks-vps.service
 ```
 
-主服务依赖 `socks-vps-firewall.service`。启动、停止或重启主服务时，
-项目自有防火墙随之处理；主进程意外退出时防火墙也会撤销，直接停止防火墙
-则会停止主服务。安装器的更新、重装、恢复和卸载会依次显式停止主服务与
-防火墙服务，并确认两个 unit 均不活动且自有 nftables 表已撤销后再改文件。
-通过 systemd reload 原生 `nftables.service` 后，自有规则会重新应用；
-规则重建失败时主服务停止。restart 时主服务随防火墙重启，并在自有规则
-就绪后恢复监听。
-若原生 `nftables.service` 当前未运行，需要在 Socks-VPS 运行期间启用它，
-请使用 `sudo systemctl restart nftables.service`；单独 start 不会触发上述
-停止与重建顺序。
+更新会保留所有端口、凭据和大陆阻断选项。配置变更、更新和卸载前会在 `/var/backups/socks-vps/` 留下可恢复快照。
 
-## 认证
+## 大陆来源阻断
 
-配置只支持一个用户名和密码，保存在
-`/etc/socks-vps/config.json`，权限为 `0640 root:socks-vps`。凭据不进入
-命令行、systemd unit 或日志。RFC 1929 用户名/密码认证本身不加密传输。
+默认规则使用随版本打包的 IPdeny CN IPv4 网段，只对启用阻断的 SOCKS TCP 端口执行 `drop`。未命中的流量继续经过主机原有 nftables、firewalld、UFW 和云防火墙规则。
 
-## CN 来源规则
+项目使用独立的 `table ip socks_vps`，不添加全局 `accept`，不修改默认策略，也不会接管 WARP VPS Manager 的服务、端口、网卡、路由或 `table inet warp_vps`。同名 nftables 表只有带项目所有权标记时才会被替换或删除。
 
-`table ip socks_vps` 只对当前 SOCKS TCP 端口执行：
+如果全部配置都关闭大陆阻断，Socks-VPS 不要求安装 nftables，也不会操作外部同名表。
 
-- 来源命中 IPdeny `CN` IPv4 aggregated 集合：`drop`。
-- 未命中：继续经过主机已有的 nftables、firewalld、UFW 和云防火墙规则。
+## 支持环境
 
-项目不添加全局 `accept`，不修改默认策略，也不修改
-`table inet warp_vps` 或任何 WARP VPS Manager 服务、端口、网卡、路由、
-配置和状态。IPdeny 数据只覆盖其当前 CN 地址分配集合，不是 GFW 探测节点
-名单。
+- 使用 systemd 的 Linux
+- `amd64` 或 `arm64`
+- IPv4 网络
+- `curl`、`tar` 和 SHA-256 工具
 
-`cn_ipv4` set 的固定注释是运行时所有权标记；缺少该标记的同名 table
-视为外部资源，安装器不会替换或删除。
+缺少运行依赖时，安装器支持 APT、DNF 和 YUM，并且只安装实际缺少的包。手动指定的端口若已被占用，安装会显示占用者并停止；自动模式只跳过占用端口，不会因普通系统识别结果提前中止。
 
-仓库中的四个权威上游文件为：
+## 配置与资源
 
-- `assets/ipdeny/cn-aggregated.zone`
-- `assets/ipdeny/Copyrights.txt`
-- `assets/ipdeny/MD5SUM.upstream`
-- `assets/ipdeny/SOURCE.json`
-
-VPS 安装、更新和启动只读取发布包内的数据，不访问 IPdeny。维护者使用
-`scripts/update-ipdeny.sh` 单次下载并验证新数据，审查四个文件后随新版本
-发布。维护脚本串行执行，每项工件只请求一次，并在相邻请求间等待 1 秒，
-符合 IPdeny 每 IP 每日不超过 5000 次下载、并发不超过 5 个连接、请求间隔
-0.5–1 秒的 [Fair Usage Limits](https://www.ipdeny.com/usagelimits.php)。
-IPdeny 的转载条件保存在 `Copyrights.txt`。
-
-## 文件与所有权
-
-- 配置：`/etc/socks-vps/config.json`
-- 当前版本：`/usr/local/lib/socks-vps/current`
-- 版本目录：`/usr/local/lib/socks-vps/releases/<version>`
+- SOCKS 配置：`/etc/socks-vps/instances/*.json`
+- 管理命令：`/usr/local/bin/socks-vpsctl`
 - 程序入口：`/usr/local/bin/socks-vps`
-- systemd：`socks-vps.service`、`socks-vps-firewall.service`
+- 当前版本：`/usr/local/lib/socks-vps/current`
+- 服务：`socks-vps.service`
+- 防火墙生命周期：`socks-vps-firewall.service`
 - nftables：`table ip socks_vps`
-- 可恢复备份：`/var/backups/socks-vps/<timestamp>-<action>`
+- 可恢复备份：`/var/backups/socks-vps/`
 
-更新保留当前端口和认证配置，并同步配置内的安装版本。更新前会保存配置、
-units、完整程序与规则数据；失败时打印备份目录内可独立执行的恢复命令：
+Socks-VPS 使用标准 SOCKS5 用户名/密码认证，不额外封装加密隧道。
 
-```bash
-sudo /var/backups/socks-vps/<backup>/restore.sh --restore /var/backups/socks-vps/<backup>
-```
+## License
 
-卸载先停止流量和自有防火墙，确认端口释放，再把配置、程序和 units 移入
-带时间戳的备份目录。共享系统包和其他项目资源不受影响；专用系统账户会
-锁定并保留，以便使用卸载结果打印的同一条 `restore.sh --restore` 命令
-恢复。恢复入口支持从部分移动状态继续，不覆盖同名目标。
-
-## 构建与发布
-
-本地构建包：
-
-```bash
-./scripts/build-release.sh 1.0.4
-```
-
-此模式会构建 `linux/amd64` 和 `linux/arm64` 版本，但公开发布校验保持
-阻塞。公开发布构建：
-
-```bash
-./scripts/build-release.sh 1.0.4 https://github.com/mqfut123/Socks-VPS
-```
-
-GitHub Release `v<VERSION>` 必须包含：
-
-- `install-v<VERSION>.sh`
-- `socks-vps-v<VERSION>-linux-amd64.tar.gz`
-- `socks-vps-v<VERSION>-linux-amd64.tar.gz.sha256`
-- `socks-vps-v<VERSION>-linux-arm64.tar.gz`
-- `socks-vps-v<VERSION>-linux-arm64.tar.gz.sha256`
-
-构建使用全新的版本化 `dist/staging/<version>-<target>`，对应路径已存在
-时停止，不覆盖历史构建。每个归档包含程序、安装器、两个 units、四个
-IPdeny 文件、项目 MIT 许可、第三方许可、
-`MANIFEST.sha256` 和版本/架构信息；包校验检查成员 allowlist、逐文件哈希、
-源码与包内文档、脚本、units、许可及 IPdeny 字节一致性、ELF 架构，
-并以锁定依赖和当前源码重建二进制进行字节比对。未配置真实 HTTPS 项目
-地址时，公开发布校验保持阻塞。
-
-Socks-VPS 以 [MIT License](LICENSE) 发布。发布包根目录包含项目
-`LICENSE`，同时附带 go-gost/gosocks5 的 MIT 许可和 IPdeny 的上游版权
-文件。
-
-## 验证状态
-
-本地发布门禁要求 Go 测试、shell 语法、systemd 静态契约、发布包成员与
-字节校验全部通过。
-
-2026-07-26 在 Ubuntu 22.04 `amd64` KVM VPS 完成：
-
-- 公开包自动端口安装、用户名密码认证、TCP `CONNECT`、公网 IPv4 出口，
-  以及 IPv6、UDP、BIND、私网、回环和元数据目标拒绝。
-- IPdeny CN set 的隔离来源命中测试；该项是规则模拟，不是真实 CN/GFW
-  来源验收。
-- nftables 自有表重复加载、主进程异常退出、端口冲突、配置错误、unit
-  停止传播、原生 nftables reload/restart、规则重建失败停止监听和开机
-  启动。
-- UFW 启用、reload、默认拒绝和还原；UFW 拒绝代理端口时，Socks-VPS
-  不会绕过现有防火墙。
-- 三轮各 256 条 TCP 隧道、256 条慢握手连接和活动隧道停服清理；实测
-  峰值 RSS 约 10.7 MiB、cgroup 内存约 13.2 MiB，慢握手在
-  10.03–10.19 秒关闭。
-- 保留端口和凭据的更新、可恢复卸载、恢复及重启后验收。
-
-仍需独立完成 DNF/YUM、`arm64`、真实 CN/GFW 来源、active firewalld
-以及与 WARP VPS Manager 同机的完整验收。
-
-## 维护交接
-
-- 当前活跃交接：[HANDOFF.md](https://github.com/mqfut123/Socks-VPS/blob/main/HANDOFF.md)
-- 历史时间线与完整归档：[docs/handoffs/README.md](https://github.com/mqfut123/Socks-VPS/blob/main/docs/handoffs/README.md)
+Socks-VPS 以 [MIT License](LICENSE) 发布。第三方许可和 IPdeny 数据来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

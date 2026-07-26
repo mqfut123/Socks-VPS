@@ -1,4 +1,4 @@
-// Package config owns the single on-disk Socks-VPS configuration format.
+// Package config owns the on-disk Socks-VPS configuration format.
 package config
 
 import (
@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"socks-vps/internal/port"
@@ -19,13 +21,15 @@ const (
 	FileMode      = 0o640
 )
 
-// Config is the sole authoritative runtime and installed-version state.
+// Config is the authoritative runtime and installed-version state for one
+// SOCKS listener.
 type Config struct {
 	Schema   int    `json:"schema"`
 	Listen   string `json:"listen"`
 	Port     int    `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	AllowCN  bool   `json:"allow_cn,omitempty"`
 	Version  string `json:"version"`
 }
 
@@ -94,6 +98,47 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("decode configuration %s: %w", path, err)
 	}
 	return value, nil
+}
+
+// LoadDirectory reads every direct *.json child in lexical filename order.
+// Each file keeps the same strict validation and permission contract as Load.
+func LoadDirectory(path string) ([]Config, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("read configuration directory %s: %w", path, err)
+	}
+
+	var names []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("configuration directory %s contains no *.json files", path)
+	}
+
+	values := make([]Config, 0, len(names))
+	ports := make(map[int]string, len(names))
+	for _, name := range names {
+		configPath := filepath.Join(path, name)
+		value, err := Load(configPath)
+		if err != nil {
+			return nil, err
+		}
+		if previous, exists := ports[value.Port]; exists {
+			return nil, fmt.Errorf(
+				"configuration port %d is duplicated in %s and %s",
+				value.Port,
+				previous,
+				name,
+			)
+		}
+		ports[value.Port] = name
+		values = append(values, value)
+	}
+	return values, nil
 }
 
 func decode(reader io.Reader) (Config, error) {

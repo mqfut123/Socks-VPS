@@ -148,16 +148,51 @@ func ClassifyExistingTable(reader io.Reader) (TableState, error) {
 	return TableForeign, nil
 }
 
-// Render writes one complete nft -f batch. TableAbsent creates the table.
-// TableOwned first deletes the owned table and then recreates it in the same
-// batch, so nft applies the replacement as one transaction. Foreign tables are
-// never modified.
+// Render writes one complete nft -f batch for one blocked listener port.
 func Render(writer io.Writer, port int, prefixes []netip.Prefix, state TableState) error {
+	return RenderPorts(writer, []int{port}, prefixes, state)
+}
+
+// RenderPorts writes one complete nft -f batch for all blocked listener ports.
+// TableAbsent creates the table. TableOwned first deletes the owned table and
+// then recreates it in the same batch, so nft applies the replacement as one
+// transaction. A non-empty port list never modifies a foreign table.
+//
+// An empty port list requests no CN source blocking. In that state an owned
+// table is removed, while absent and foreign tables are left untouched.
+func RenderPorts(
+	writer io.Writer,
+	ports []int,
+	prefixes []netip.Prefix,
+	state TableState,
+) error {
+	if len(ports) == 0 {
+		switch state {
+		case TableAbsent, TableForeign:
+			return nil
+		case TableOwned:
+			return RenderRemove(writer, state)
+		default:
+			return fmt.Errorf("render nftables batch: invalid table state %d", state)
+		}
+	}
 	if writer == nil {
 		return fmt.Errorf("render nftables batch: nil writer")
 	}
-	if port < minPort || port > maxPort {
-		return fmt.Errorf("render nftables batch: port must be between %d and %d: %d", minPort, maxPort, port)
+	seenPorts := make(map[int]struct{}, len(ports))
+	for _, port := range ports {
+		if port < minPort || port > maxPort {
+			return fmt.Errorf(
+				"render nftables batch: port must be between %d and %d: %d",
+				minPort,
+				maxPort,
+				port,
+			)
+		}
+		if _, exists := seenPorts[port]; exists {
+			return fmt.Errorf("render nftables batch: duplicate port %d", port)
+		}
+		seenPorts[port] = struct{}{}
 	}
 	if len(prefixes) == 0 {
 		return ErrEmptyCIDRs
@@ -226,14 +261,38 @@ func Render(writer io.Writer, port int, prefixes []netip.Prefix, state TableStat
 	}
 	if _, err := fmt.Fprintf(
 		writer,
-		"add rule %s %s %s ip saddr @%s tcp dport %d counter drop\n",
+		"add rule %s %s %s ip saddr @%s tcp dport ",
 		TableFamily,
 		TableName,
 		ChainName,
 		SetName,
-		port,
 	); err != nil {
 		return fmt.Errorf("render nftables drop rule: %w", err)
+	}
+	if len(ports) == 1 {
+		if _, err := fmt.Fprint(writer, ports[0]); err != nil {
+			return fmt.Errorf("render nftables drop rule port: %w", err)
+		}
+	} else {
+		if _, err := io.WriteString(writer, "{ "); err != nil {
+			return fmt.Errorf("render nftables drop rule ports: %w", err)
+		}
+		for index, port := range ports {
+			if index > 0 {
+				if _, err := io.WriteString(writer, ", "); err != nil {
+					return fmt.Errorf("render nftables drop rule separator: %w", err)
+				}
+			}
+			if _, err := fmt.Fprint(writer, port); err != nil {
+				return fmt.Errorf("render nftables drop rule port %d: %w", index, err)
+			}
+		}
+		if _, err := io.WriteString(writer, " }"); err != nil {
+			return fmt.Errorf("render nftables drop rule ports: %w", err)
+		}
+	}
+	if _, err := io.WriteString(writer, " counter drop\n"); err != nil {
+		return fmt.Errorf("render nftables drop rule closing: %w", err)
 	}
 	return nil
 }
