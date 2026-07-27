@@ -298,11 +298,11 @@ func RenderPorts(
 }
 
 // RenderRemove writes the complete batch for removing the Socks-VPS table.
-// Only a table already classified as owned may be deleted. An absent table is
-// already in the requested state and produces no batch.
+// Only a table already classified as owned may be deleted. Absent and foreign
+// tables are already in the requested state and produce no batch.
 func RenderRemove(writer io.Writer, state TableState) error {
 	switch state {
-	case TableAbsent:
+	case TableAbsent, TableForeign:
 		return nil
 	case TableOwned:
 		if writer == nil {
@@ -312,8 +312,6 @@ func RenderRemove(writer io.Writer, state TableState) error {
 			return fmt.Errorf("render nftables removal: %w", err)
 		}
 		return nil
-	case TableForeign:
-		return ErrTableConflict
 	default:
 		return fmt.Errorf("render nftables removal: invalid table state %d", state)
 	}

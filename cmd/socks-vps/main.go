@@ -813,24 +813,27 @@ func writeFileAtomically(path string, mode os.FileMode, render func(io.Writer) e
 		return fmt.Errorf("create temporary output in %s: %w", directory, err)
 	}
 	temporaryPath := temporary.Name()
+	defer func() {
+		_ = os.Remove(temporaryPath)
+	}()
 
 	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
-		return retainedOutputError("set temporary output permissions", temporaryPath, err)
+		return fmt.Errorf("set temporary output permissions: %w", err)
 	}
 	if err := render(temporary); err != nil {
 		_ = temporary.Close()
-		return retainedOutputError("render temporary output", temporaryPath, err)
+		return fmt.Errorf("render temporary output: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
-		return retainedOutputError("sync temporary output", temporaryPath, err)
+		return fmt.Errorf("sync temporary output: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return retainedOutputError("close temporary output", temporaryPath, err)
+		return fmt.Errorf("close temporary output: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
-		return retainedOutputError(fmt.Sprintf("install output %s", path), temporaryPath, err)
+		return fmt.Errorf("install output %s: %w", path, err)
 	}
 	directoryHandle, err := os.Open(directory)
 	if err != nil {
@@ -841,10 +844,6 @@ func writeFileAtomically(path string, mode os.FileMode, render func(io.Writer) e
 		return fmt.Errorf("sync output directory %s: %w", directory, err)
 	}
 	return nil
-}
-
-func retainedOutputError(action, temporaryPath string, err error) error {
-	return fmt.Errorf("%s: %w; temporary file retained at %s", action, err, temporaryPath)
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {

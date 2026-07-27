@@ -176,30 +176,29 @@ func Write(path string, value Config) error {
 		return fmt.Errorf("create temporary configuration in %s: %w", directory, err)
 	}
 	temporaryPath := temporary.Name()
+	defer func() {
+		_ = os.Remove(temporaryPath)
+	}()
 
 	encoder := json.NewEncoder(temporary)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(value); err != nil {
 		_ = temporary.Close()
-		return retainedTemporaryError("encode temporary configuration", temporaryPath, err)
+		return fmt.Errorf("encode temporary configuration: %w", err)
 	}
 	if err := temporary.Chmod(FileMode); err != nil {
 		_ = temporary.Close()
-		return retainedTemporaryError("set temporary configuration permissions", temporaryPath, err)
+		return fmt.Errorf("set temporary configuration permissions: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
-		return retainedTemporaryError("sync temporary configuration", temporaryPath, err)
+		return fmt.Errorf("sync temporary configuration: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return retainedTemporaryError("close temporary configuration", temporaryPath, err)
+		return fmt.Errorf("close temporary configuration: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
-		return retainedTemporaryError(
-			fmt.Sprintf("install configuration %s", path),
-			temporaryPath,
-			err,
-		)
+		return fmt.Errorf("install configuration %s: %w", path, err)
 	}
 
 	directoryHandle, err := os.Open(directory)
@@ -211,17 +210,4 @@ func Write(path string, value Config) error {
 		return fmt.Errorf("sync configuration directory %s: %w", directory, err)
 	}
 	return nil
-}
-
-func retainedTemporaryError(action, temporaryPath string, err error) error {
-	if modeErr := os.Chmod(temporaryPath, 0o600); modeErr != nil {
-		return fmt.Errorf(
-			"%s: %w; temporary file retained at %s; restore mode 0600: %v",
-			action,
-			err,
-			temporaryPath,
-			modeErr,
-		)
-	}
-	return fmt.Errorf("%s: %w; temporary file retained at %s", action, err, temporaryPath)
 }
