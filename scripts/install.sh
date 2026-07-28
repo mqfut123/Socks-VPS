@@ -669,8 +669,10 @@ configuration_tree_requires_nft() {
                 --config-dir "${tree}/instances" \
                 --blocked-cn-only
         ) || return 1
-        [[ -n ${ports} ]]
-        return
+        if [[ -n ${ports} ]]; then
+            return 0
+        fi
+        return 1
     fi
     [[ -f ${tree}/config.json ]]
 }
