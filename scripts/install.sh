@@ -30,6 +30,7 @@ transaction_dir=
 transaction_active=false
 transaction_kind=
 transaction_current_target=
+transaction_public_kind=
 transaction_public_target=
 transaction_control_target=
 transaction_control_present=false
@@ -251,11 +252,12 @@ check_new_config_without_write() {
 installation_exists() {
     [[ (-d ${instances_dir} || -f ${legacy_config_file}) &&
        -L ${current_link} &&
-       -L ${public_binary} ]]
+       (-f ${public_binary} || -L ${public_binary}) ]]
 }
 
 installation_entry_exists() {
-    [[ -L ${current_link} && -L ${public_binary} ]]
+    [[ -L ${current_link} &&
+       (-f ${public_binary} || -L ${public_binary}) ]]
 }
 
 installation_detected() {
@@ -820,10 +822,23 @@ rollback_transaction() {
             failed=true
         fi
     fi
-    if [[ -n ${transaction_public_target} ]]; then
-        if ! ln -sfn "${transaction_public_target}" "${public_binary}"; then
+    if [[ ${transaction_public_kind} == symlink ]]; then
+        if ! ln -s "${transaction_public_target}" "${public_binary}.pending-$$"; then
+            failed=true
+        elif ! mv -f "${public_binary}.pending-$$" "${public_binary}"; then
+            rm -f -- "${public_binary}.pending-$$"
             failed=true
         fi
+    elif [[ ${transaction_public_kind} == file ]]; then
+        if ! install -m 0755 -o root -g root \
+            "${transaction_dir}/socks-vps" "${public_binary}.pending-$$"; then
+            failed=true
+        elif ! mv -f "${public_binary}.pending-$$" "${public_binary}"; then
+            rm -f -- "${public_binary}.pending-$$"
+            failed=true
+        fi
+    else
+        failed=true
     fi
     if [[ ${transaction_control_present} == true ]]; then
         if ! ln -sfn "${transaction_control_target}" "${control_binary}"; then
@@ -906,7 +921,15 @@ begin_transaction() {
         "${firewall_unit}" "${transaction_dir}/socks-vps-firewall.service"
     transaction_kind=${kind}
     transaction_current_target=$(readlink -f "${current_link}")
-    transaction_public_target=$(readlink -f "${public_binary}")
+    if [[ -L ${public_binary} ]]; then
+        transaction_public_kind=symlink
+        transaction_public_target=$(readlink -f "${public_binary}")
+    else
+        transaction_public_kind=file
+        transaction_public_target=
+        install -m 0755 -o root -g root \
+            "${public_binary}" "${transaction_dir}/socks-vps"
+    fi
     if [[ -e ${control_binary} || -L ${control_binary} ]]; then
         transaction_control_present=true
         transaction_control_target=$(readlink -f "${control_binary}")
@@ -944,6 +967,7 @@ commit_transaction() {
     transaction_dir=
     transaction_kind=
     transaction_current_target=
+    transaction_public_kind=
     transaction_public_target=
     transaction_control_target=
     transaction_control_present=false
@@ -982,11 +1006,11 @@ cleanup_legacy_artifacts() {
     find \
         "${install_root}" \
         "$(dirname -- "${public_binary}")" \
-        -maxdepth 1 -type l \
+        -maxdepth 1 \( -type f -o -type l \) \
         \( -path "${current_link}.pending-*" \
            -o -path "${public_binary}.pending-*" \
            -o -path "${control_binary}.pending-*" \) \
-        -delete 2>/dev/null || die '无法清理历史符号链接残留'
+        -delete 2>/dev/null || die '无法清理历史切换残留'
     [[ -d ${releases_dir} && -L ${current_link} ]] || return 0
     current_target=$(readlink -f "${current_link}")
     [[ ${current_target} == "${releases_dir}/"* ]] ||
@@ -1175,7 +1199,8 @@ require_owned_installation() {
     if [[ ${require_config} == true ]]; then
         installation_exists || die 'Socks-VPS 安装所有权边界不完整'
     else
-        [[ -L ${current_link} && -L ${public_binary} ]] ||
+        [[ -L ${current_link} &&
+           (-f ${public_binary} || -L ${public_binary}) ]] ||
             die 'Socks-VPS 安装所有权边界不完整'
     fi
     [[ -f ${main_unit} && -f ${firewall_unit} ]] ||
@@ -1184,9 +1209,15 @@ require_owned_installation() {
     [[ ${current_target} == "${releases_dir}/"* &&
        -x ${current_target}/bin/socks-vps ]] ||
         die '当前版本链接未指向 Socks-VPS 自有版本目录'
-    public_target=$(readlink -f "${public_binary}")
-    [[ ${public_target} == "${current_target}/bin/socks-vps" ]] ||
+    if [[ -L ${public_binary} ]]; then
+        public_target=$(readlink -f "${public_binary}")
+        [[ ${public_target} == "${current_target}/bin/socks-vps" ]] ||
+            die '公开主程序与当前版本不一致'
+    elif [[ ! -f ${public_binary} ||
+            ! -x ${public_binary} ]] ||
+         ! cmp -s "${public_binary}" "${current_target}/bin/socks-vps"; then
         die '公开主程序与当前版本不一致'
+    fi
     if [[ -e ${control_binary} || -L ${control_binary} ]]; then
         control_target=$(readlink -f "${control_binary}")
         [[ ${control_target} == "${current_target}/scripts/install.sh" ]] ||
@@ -1356,7 +1387,7 @@ activate_release() {
     local release_dir=$1
 
     replace_symlink "${release_dir}" "${current_link}"
-    replace_symlink "${current_link}/bin/socks-vps" "${public_binary}"
+    replace_executable "${release_dir}/bin/socks-vps" "${public_binary}"
     replace_symlink "${current_link}/scripts/install.sh" "${control_binary}"
     install -m 0644 -o root -g root \
         "${release_dir}/packaging/systemd/socks-vps.service" \
@@ -1365,6 +1396,30 @@ activate_release() {
         "${release_dir}/packaging/systemd/socks-vps-firewall.service" \
         "${firewall_unit}"
     systemctl daemon-reload
+}
+
+replace_executable() {
+    local source=$1
+    local destination=$2
+    local pending="${destination}.pending-$$"
+
+    [[ -f ${source} && -x ${source} ]] ||
+        die "主程序不可执行：${source}"
+    if [[ -e ${destination} &&
+          ! -f ${destination} &&
+          ! -L ${destination} ]]; then
+        die "主程序目标位置存在非文件对象：${destination}"
+    fi
+    [[ ! -e ${pending} && ! -L ${pending} ]] ||
+        die "待切换主程序已存在：${pending}"
+    if ! install -m 0755 -o root -g root "${source}" "${pending}"; then
+        rm -f -- "${pending}"
+        die "无法安装待切换主程序：${pending}"
+    fi
+    if ! mv -f "${pending}" "${destination}"; then
+        rm -f -- "${pending}"
+        die "无法切换主程序：${destination}"
+    fi
 }
 
 replace_symlink() {
