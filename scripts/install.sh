@@ -23,6 +23,8 @@ readonly control_binary=/usr/local/bin/socks-vpsctl
 readonly main_unit=/etc/systemd/system/socks-vps.service
 readonly firewall_unit=/etc/systemd/system/socks-vps-firewall.service
 readonly backup_root=/var/backups/socks-vps
+readonly runtime_dir=/run/socks-vps
+readonly transaction_fallback_root=/var/tmp
 installed_release_dir=
 transaction_dir=
 transaction_active=false
@@ -355,8 +357,9 @@ choose_existing_action() {
     printf '  4) 修改凭据\n'
     printf '  5) 删除 SOCKS\n'
     printf '  6) 重装并永久替换全部 SOCKS 配置\n'
-    printf '  7) 永久卸载\n'
-    printf '  8) 取消\n'
+    printf '  7) 清理日志\n'
+    printf '  8) 永久卸载\n'
+    printf '  9) 取消\n'
     IFS= read -r -p '请选择：' choice
 
     case ${choice} in
@@ -397,6 +400,10 @@ choose_existing_action() {
             generate_secret_pair
             ;;
         7)
+            direct_cleanup
+            exit 0
+            ;;
+        8)
             selected_action=uninstall
             selected_port_mode=preserve
             selected_port=0
@@ -404,7 +411,7 @@ choose_existing_action() {
             selected_password=
             selected_allow_cn=false
             ;;
-        8)
+        9)
             exit 0
             ;;
         *)
@@ -428,7 +435,7 @@ print_impact() {
             return
             ;;
     esac
-    printf 'WARP VPS Manager 及共享系统软件包不会被修改。\n'
+    printf 'WARP VPS Manager 不会被修改，共享系统软件包不会被删除。\n'
 }
 
 confirm_action() {
@@ -447,6 +454,13 @@ run_privileged() {
     local instance_name=$6
     local username=$7
     local password=$8
+
+    if [[ ${action} == uninstall ]]; then
+        require_owned_installation false
+    fi
+    if [[ ${action} != cleanup ]]; then
+        confirm_system_dependency_installation
+    fi
 
     if [[ ${EUID} -eq 0 ]]; then
         privileged_apply \
@@ -490,42 +504,87 @@ detect_package_manager() {
     fi
 }
 
-ensure_system_dependencies() {
-    local require_nft=${1:-true}
-    local manager
-    local need_nft=0
-    local need_iproute=0
-    local -a packages=()
+missing_system_dependency_packages() {
+    local manager=$1
 
-    if [[ ${require_nft} == true ]] &&
-       ! command -v nft >/dev/null 2>&1; then
-        need_nft=1
+    if ! command -v nft >/dev/null 2>&1; then
+        printf '%s\n' nftables
     fi
     if ! command -v ss >/dev/null 2>&1 ||
        ! command -v ip >/dev/null 2>&1; then
-        need_iproute=1
+        case ${manager} in
+            apt)
+                printf '%s\n' iproute2
+                ;;
+            dnf | yum)
+                printf '%s\n' iproute
+                ;;
+        esac
     fi
-    if ((need_nft == 0 && need_iproute == 0)); then
+}
+
+confirm_system_dependency_installation() {
+    local manager answer package package_text=
+    local -a packages=()
+
+    if command -v nft >/dev/null 2>&1 &&
+       command -v ss >/dev/null 2>&1 &&
+       command -v ip >/dev/null 2>&1; then
         return
     fi
 
     manager=$(detect_package_manager)
+    while IFS= read -r package; do
+        [[ -n ${package} ]] && packages+=("${package}")
+    done < <(missing_system_dependency_packages "${manager}")
+    ((${#packages[@]} > 0)) || return
+    for package in "${packages[@]}"; do
+        if [[ -n ${package_text} ]]; then
+            package_text+='、'
+        fi
+        package_text+=${package}
+    done
+
+    status_line info "检测到缺少系统依赖：${package_text}"
+    IFS= read -r -p '是否安装以上依赖？[Y/n]（回车确认，输入 n/N 取消）：' answer
+    case ${answer:-y} in
+        y | Y | yes | YES | Yes)
+            ;;
+        n | N | no | NO | No)
+            status_line info '已取消操作'
+            exit 0
+            ;;
+        *)
+            die '请输入 y 或 n'
+            ;;
+    esac
+}
+
+ensure_system_dependencies() {
+    local manager package
+    local -a packages=()
+
+    if command -v nft >/dev/null 2>&1 &&
+       command -v ss >/dev/null 2>&1 &&
+       command -v ip >/dev/null 2>&1; then
+        return
+    fi
+
+    manager=$(detect_package_manager)
+    while IFS= read -r package; do
+        [[ -n ${package} ]] && packages+=("${package}")
+    done < <(missing_system_dependency_packages "${manager}")
+    ((${#packages[@]} > 0)) || return
     note "正在通过 ${manager} 安装所需系统软件包"
     case ${manager} in
         apt)
-            ((need_nft == 0)) || packages+=(nftables)
-            ((need_iproute == 0)) || packages+=(iproute2)
             apt-get update
             apt-get install -y "${packages[@]}"
             ;;
         dnf)
-            ((need_nft == 0)) || packages+=(nftables)
-            ((need_iproute == 0)) || packages+=(iproute)
             dnf install -y "${packages[@]}"
             ;;
         yum)
-            ((need_nft == 0)) || packages+=(nftables)
-            ((need_iproute == 0)) || packages+=(iproute)
             yum install -y "${packages[@]}"
             ;;
     esac
@@ -648,6 +707,11 @@ check_or_reselect_port() {
     local status output
 
     if [[ ${mode} == automatic ]]; then
+        if [[ -d ${instances_dir} ]]; then
+            "${package_binary}" port-select \
+                --config-dir "${instances_dir}"
+            return
+        fi
         printf '%s\n' "${port}"
         return 0
     fi
@@ -887,6 +951,18 @@ cleanup_legacy_artifacts() {
     if [[ -e ${backup_root} ]]; then
         rm -rf -- "${backup_root}"
     fi
+    if [[ -d ${install_root} ]]; then
+        find "${install_root}" -maxdepth 1 -type d \
+            -name '.transaction.*' \
+            -exec rm -rf -- {} + ||
+            die '无法清理安装目录内的事务残留'
+    fi
+    if [[ -d ${transaction_fallback_root} ]]; then
+        find "${transaction_fallback_root}" -maxdepth 1 -type d \
+            -name 'socks-vps-transaction.*' \
+            -exec rm -rf -- {} + ||
+            die '无法清理临时目录内的事务残留'
+    fi
     if [[ -d ${config_dir} ]]; then
         find "${config_dir}" -maxdepth 2 -type f \
             \( -name '*.migrated-*' \
@@ -917,6 +993,16 @@ cleanup_legacy_artifacts() {
             rm -rf -- "${release}"
         fi
     done < <(find "${releases_dir}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+cleanup_runtime_artifacts() {
+    [[ -d ${runtime_dir} ]] || return 0
+    rm -f -- \
+        "${runtime_dir}/existing-table.json" \
+        "${runtime_dir}/socks-vps.nft" \
+        "${runtime_dir}/remove-socks-vps.nft" \
+        "${runtime_dir}/nft-list.stderr" \
+        "${runtime_dir}/nft-tables.txt"
 }
 
 preflight_firewall() {
@@ -1306,6 +1392,7 @@ verify_active_installation() {
 required_firewall_state_is_healthy() {
     local existing_json removal_batch tables
     local require_nft=false
+    local -a health_config
 
     if configuration_requires_nft; then
         require_nft=true
@@ -1315,6 +1402,19 @@ required_firewall_state_is_healthy() {
         return
     fi
     if existing_json=$(nft --json list table ip socks_vps 2>/dev/null); then
+        if [[ ${require_nft} == true ]]; then
+            if [[ -d ${instances_dir} ]]; then
+                health_config=(--config-dir "${instances_dir}")
+            else
+                health_config=(--config "${legacy_config_file}")
+            fi
+            printf '%s\n' "${existing_json}" |
+                "${package_binary}" firewall-render \
+                    --check-health \
+                    "${health_config[@]}" \
+                    --existing-table-json - >/dev/null 2>&1
+            return
+        fi
         removal_batch=$(
             printf '%s\n' "${existing_json}" |
                 "${package_binary}" firewall-render \
@@ -1352,7 +1452,7 @@ start_and_verify() {
     local allow_cn=$6
     local port=$7
     local attempt=1
-    local start_status verify_status exec_status port_check_status
+    local start_status verify_status exec_status
     local pending
 
     while ((attempt <= 2)); do
@@ -1380,15 +1480,9 @@ start_and_verify() {
         [[ -n ${exec_status} ]] || exec_status=unavailable
         stop_owned_services
 
-        if "${package_binary}" port-check --port "${port}" >/dev/null 2>&1; then
-            port_check_status=0
-        else
-            port_check_status=$?
-        fi
         if [[ ${port_mode} != automatic ||
               ${exec_status} != 78 ||
-              ${attempt} -ne 1 ||
-              ${port_check_status} -ne 78 ]]; then
+              ${attempt} -ne 1 ]]; then
             if ! systemctl status socks-vps.service --no-pager; then
                 printf '上方为启动失败时的服务状态。\n' >&2
             fi
@@ -1397,7 +1491,10 @@ start_and_verify() {
 
         note "自动端口 ${port} 在绑定前被占用，重新选择一次"
         systemctl reset-failed socks-vps.service
-        port=$("${package_binary}" port-select)
+        port=$(
+            "${package_binary}" port-select \
+                --config-dir "${instances_dir}"
+        )
         check_new_config_without_write \
             "${port}" "${version}" "${username}" "${password}" "${allow_cn}"
         pending="${instances_dir}/.${name}.retry-${version}-$$"
@@ -1455,7 +1552,6 @@ install_or_replace() {
     local release_dir
     local selected
     local allow_current_owner=false
-    local require_nft=false
     local installed_version_file
 
     if [[ ${action} == install ]]; then
@@ -1463,23 +1559,18 @@ install_or_replace() {
         check_fresh_account_conflicts
     else
         require_owned_installation
-        if [[ ${action} == update ]]; then
-            installed_version_file="$(readlink -f "${current_link}")/VERSION"
-            if [[ -r ${installed_version_file} &&
-                  $(<"${installed_version_file}") == "${version}" ]]; then
-                cleanup_legacy_artifacts
-                success "Socks-VPS ${version} 已是当前版本"
-                return
-            fi
-        fi
     fi
 
-    if [[ ${action} != install ]] && configuration_requires_nft; then
-        require_nft=true
-    elif [[ ${action} != update && ${allow_cn} == false ]]; then
-        require_nft=true
+    ensure_system_dependencies
+    if [[ ${action} == update ]]; then
+        installed_version_file="$(readlink -f "${current_link}")/VERSION"
+        if [[ -r ${installed_version_file} &&
+              $(<"${installed_version_file}") == "${version}" ]]; then
+            cleanup_legacy_artifacts
+            success "Socks-VPS ${version} 已是当前版本"
+            return
+        fi
     fi
-    ensure_system_dependencies "${require_nft}"
     show_coexistence_state
 
     if [[ ${action} == install || ${action} == reinstall ]]; then
@@ -1566,6 +1657,7 @@ uninstall_permanently() {
     local main_pid listeners current_sockets
 
     require_owned_installation false
+    ensure_system_dependencies
     main_pid=$(systemctl show socks-vps.service --property=MainPID --value) ||
         die '无法读取 Socks-VPS 主服务进程状态'
     listeners=
@@ -1599,6 +1691,7 @@ uninstall_permanently() {
         fi
     fi
 
+    cleanup_legacy_artifacts
     rm -rf -- "${config_dir}"
     rm -f -- "${public_binary}" "${control_binary}" "${main_unit}" "${firewall_unit}"
     rm -rf -- "${install_root}" "${backup_root}" /run/socks-vps
@@ -1747,16 +1840,13 @@ add_instance() {
     local allow_cn=$4
     local username=$5
     local password=$6
-    local name selected require_nft=false
+    local name selected
 
     require_owned_installation
     [[ -d ${instances_dir} ]] ||
         die '请先更新 Socks-VPS，再新增 SOCKS 配置'
     name=$(next_instance_name)
-    if configuration_requires_nft || [[ ${allow_cn} == false ]]; then
-        require_nft=true
-    fi
-    ensure_system_dependencies "${require_nft}"
+    ensure_system_dependencies
     selected=$(check_or_reselect_port "${port_mode}" "${requested_port}") ||
         die '所选端口不可用'
     check_new_config_without_write \
@@ -1791,7 +1881,7 @@ change_instance_credentials() {
     local version=$2
     local username=$3
     local password=$4
-    local target pending require_nft=false
+    local target pending
 
     require_owned_installation
     [[ -d ${instances_dir} ]] ||
@@ -1805,10 +1895,7 @@ change_instance_credentials() {
         "${username}" \
         "${password}" \
         "${detail_allow_cn}"
-    if configuration_requires_nft; then
-        require_nft=true
-    fi
-    ensure_system_dependencies "${require_nft}"
+    ensure_system_dependencies
     begin_transaction credentials
     stop_owned_services
 
@@ -1834,7 +1921,6 @@ remove_instance() {
     local name=$1
     local target
     local -a paths
-    local require_nft=false
 
     require_owned_installation
     [[ -d ${instances_dir} ]] ||
@@ -1846,10 +1932,7 @@ remove_instance() {
         die '不能删除最后一组 SOCKS 配置，请使用 socks-vpsctl uninstall'
     target="${instances_dir}/${name}.json"
     [[ -f ${target} ]] || die "SOCKS 配置不存在：${name}"
-    if configuration_requires_nft; then
-        require_nft=true
-    fi
-    ensure_system_dependencies "${require_nft}"
+    ensure_system_dependencies
     begin_transaction remove
     stop_owned_services
     rm -f -- "${target}"
@@ -1860,6 +1943,14 @@ remove_instance() {
     success "已永久删除 SOCKS 配置 ${name}"
     printf '\n'
     list_instances
+}
+
+cleanup_logs() {
+    require_owned_installation false
+    cleanup_legacy_artifacts
+    cleanup_runtime_artifacts
+    success 'Socks-VPS 日志与临时残留已清理'
+    status_line info 'systemd journal 属于系统共享日志，未做清理'
 }
 
 run_latest_update() {
@@ -1932,6 +2023,9 @@ privileged_apply() {
             ;;
         uninstall)
             uninstall_permanently
+            ;;
+        cleanup)
+            cleanup_logs
             ;;
         *)
             die "特权操作无效：${action}"
@@ -2088,6 +2182,12 @@ direct_uninstall() {
     run_privileged uninstall preserve 0 0.0.0 false '' '' ''
 }
 
+direct_cleanup() {
+    installation_entry_exists || die '尚未安装 Socks-VPS'
+    require_owned_installation false
+    run_privileged cleanup preserve 0 0.0.0 false '' '' ''
+}
+
 ensure_root_for_command() {
     if [[ ${EUID} -eq 0 ]]; then
         return
@@ -2139,12 +2239,16 @@ main() {
             [[ $# -eq 1 ]] || die '用法：socks-vpsctl uninstall'
             direct_uninstall
             ;;
+        cleanup)
+            [[ $# -eq 1 ]] || die '用法：socks-vpsctl cleanup'
+            direct_cleanup
+            ;;
         --privileged-apply)
             [[ $# -eq 7 ]] || die '特权调用参数无效'
             privileged_entry "$2" "$3" "$4" "$5" "$6" "$7"
             ;;
         *)
-            die '用法：socks-vpsctl {list|status|add|credentials [CONFIG]|remove [CONFIG]|update|uninstall}'
+            die '用法：socks-vpsctl {list|status|add|credentials [CONFIG]|remove [CONFIG]|update|cleanup|uninstall}'
             ;;
     esac
 }

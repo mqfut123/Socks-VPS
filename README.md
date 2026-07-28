@@ -16,14 +16,14 @@ bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download
 | 大陆阻断 | 可选，默认开启，在 TCP 握手前由 nftables 丢弃 |
 | 资源所有权 | 只管理 Socks-VPS 自有配置、服务和 nftables 表 |
 
-安装只问两件事：
+安装配置只问两件事：
 
 ```text
 TCP 端口 [回车 = 随机选择 1024-65535]：
 是否阻止中国大陆 IPv4 TCP 访问？[Y/n]：
 ```
 
-连续两次回车，Socks-VPS 会选择一个未占用端口，默认阻断中国大陆来源，并生成 20 位安全用户名和密码。环境检查、安装包校验和服务自检会显示为简短的彩色状态；用于管道或 systemd 日志时自动改为普通文本，不输出颜色控制符。
+系统依赖齐全时，连续两次回车即可选择一个未占用端口、默认阻断中国大陆来源，并生成 20 位安全用户名和密码。缺少依赖时，安装器会在安装软件包前另行列出并确认。环境检查、安装包校验和服务自检会显示为简短的彩色状态；用于管道或 systemd 日志时自动改为普通文本，不输出颜色控制符。
 
 完成后直接显示连接信息：
 
@@ -79,6 +79,9 @@ sudo socks-vpsctl remove socks-2
 # 更新到最新版本
 sudo socks-vpsctl update
 
+# 清理日志与临时残留
+sudo socks-vpsctl cleanup
+
 # 永久卸载
 sudo socks-vpsctl uninstall
 ```
@@ -86,6 +89,8 @@ sudo socks-vpsctl uninstall
 不带参数运行 `sudo socks-vpsctl` 会进入中文交互菜单。`status` 会一起检查配置、systemd、监听归属、认证和所需防火墙状态；`list` 按配置逐项显示名称、端口和大陆来源设置。
 
 成功执行 `remove` 后，对应配置会永久删除。最后一个 SOCKS 配置不能单独删除，需要时使用 `uninstall`。菜单中的重装会先明确提示，然后永久替换全部现有 SOCKS 配置。
+
+`cleanup` 会清理 Socks-VPS 自有的运行时临时文件、历史备份、旧版本和未完成操作留下的精确残留，不停止服务，也不修改 SOCKS 配置。systemd journal 是系统共享日志，因此保持不变。
 
 服务仍可用标准 systemd 命令管理：
 
@@ -105,7 +110,7 @@ sudo systemctl start socks-vps.service
 
 项目使用独立的 `table ip socks_vps`，不添加全局 `accept`，不修改默认策略，也不会接管 WARP VPS Manager 的服务、端口、网卡、路由或 `table inet warp_vps`。同名 nftables 表只有带项目所有权标记时才会被替换或删除。
 
-如果全部配置都关闭大陆阻断，Socks-VPS 不要求安装 nftables，也不会操作外部同名表。
+即使全部配置都关闭大陆阻断，Socks-VPS 仍把 nftables 作为安装和生命周期依赖，但不会因此创建拦截规则，也不会操作外部同名表。
 
 ## 支持环境
 
@@ -114,7 +119,7 @@ sudo systemctl start socks-vps.service
 - IPv4 网络
 - `curl`、`tar` 和 `sha256sum`
 
-缺少运行依赖时，安装器支持 APT、DNF 和 YUM，并且只安装实际缺少的包。手动指定的端口若已被占用，安装会显示占用者并停止；自动模式只跳过占用端口，不会因普通系统识别结果提前中止。
+缺少 `nft`、`ip` 或 `ss` 时，安装器会列出需要安装的软件包，回车确认后通过 APT、DNF 或 YUM 只安装缺少的依赖；输入 `n` 或 `N` 会取消当前操作。手动指定的端口若已被占用，安装会显示占用者并停止；自动模式会先避开监听端口和已有 SOCKS 配置端口，真实绑定竞争时只重新选择一次。
 
 ## 配置与资源
 

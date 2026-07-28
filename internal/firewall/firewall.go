@@ -4,11 +4,13 @@ package firewall
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/netip"
+	"strconv"
 	"strings"
 )
 
@@ -30,6 +32,7 @@ var (
 	ErrEmptyCIDRs      = errors.New("IPv4 CIDR list is empty")
 	ErrTableConflict   = errors.New("nftables table ip socks_vps is not owned by Socks-VPS")
 	ErrTableNotPresent = errors.New("nftables JSON does not contain table ip socks_vps")
+	ErrTableUnhealthy  = errors.New("nftables table ip socks_vps does not provide required CN source blocking")
 )
 
 // TableState describes the read-only ownership decision made before rendering.
@@ -92,19 +95,9 @@ func ClassifyExistingTable(reader io.Reader) (TableState, error) {
 		return TableForeign, fmt.Errorf("classify existing nftables table: nil reader")
 	}
 
-	var document struct {
-		Nftables []json.RawMessage `json:"nftables"`
-	}
-	decoder := json.NewDecoder(reader)
-	if err := decoder.Decode(&document); err != nil {
-		return TableForeign, fmt.Errorf("decode nftables JSON: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return TableForeign, fmt.Errorf("decode nftables JSON: multiple JSON values")
-		}
-		return TableForeign, fmt.Errorf("decode nftables JSON trailing data: %w", err)
+	document, err := decodeNftablesDocument(reader)
+	if err != nil {
+		return TableForeign, err
 	}
 
 	tablePresent := false
@@ -146,6 +139,421 @@ func ClassifyExistingTable(reader io.Reader) (TableState, error) {
 		return TableOwned, nil
 	}
 	return TableForeign, nil
+}
+
+type nftablesDocument struct {
+	Nftables []json.RawMessage `json:"nftables"`
+}
+
+func decodeNftablesDocument(reader io.Reader) (nftablesDocument, error) {
+	var document nftablesDocument
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(&document); err != nil {
+		return nftablesDocument{}, fmt.Errorf("decode nftables JSON: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nftablesDocument{}, fmt.Errorf("decode nftables JSON: multiple JSON values")
+		}
+		return nftablesDocument{}, fmt.Errorf("decode nftables JSON trailing data: %w", err)
+	}
+	return document, nil
+}
+
+// CheckHealth verifies the minimum live nftables state required to block CN
+// sources on every supplied listener port. Extra set elements, rules, and
+// unrelated objects are allowed.
+func CheckHealth(reader io.Reader, blockedPorts []int) error {
+	if reader == nil {
+		return fmt.Errorf("check nftables table health: nil reader")
+	}
+	requiredPorts := make(map[int]struct{}, len(blockedPorts))
+	for _, port := range blockedPorts {
+		if port < minPort || port > maxPort {
+			return fmt.Errorf(
+				"check nftables table health: port must be between %d and %d: %d",
+				minPort,
+				maxPort,
+				port,
+			)
+		}
+		requiredPorts[port] = struct{}{}
+	}
+	if len(requiredPorts) == 0 {
+		return fmt.Errorf("%w: no listener port requires blocking", ErrTableUnhealthy)
+	}
+
+	document, err := decodeNftablesDocument(reader)
+	if err != nil {
+		return err
+	}
+
+	tablePresent := false
+	ownedSetPresent := false
+	setHasElements := false
+	correctInputChain := false
+	terminatingRuleBeforeCoverage := false
+	acceptRuleBeforeCoverage := false
+	coveredPorts := make(map[int]struct{}, len(requiredPorts))
+	for _, raw := range document.Nftables {
+		var object struct {
+			Table *struct {
+				Family string `json:"family"`
+				Name   string `json:"name"`
+			} `json:"table"`
+			Set *struct {
+				Family  string          `json:"family"`
+				Table   string          `json:"table"`
+				Name    string          `json:"name"`
+				Comment string          `json:"comment"`
+				Elem    json.RawMessage `json:"elem"`
+			} `json:"set"`
+			Element *struct {
+				Family string          `json:"family"`
+				Table  string          `json:"table"`
+				Name   string          `json:"name"`
+				Elem   json.RawMessage `json:"elem"`
+			} `json:"element"`
+			Chain *struct {
+				Family string `json:"family"`
+				Table  string `json:"table"`
+				Name   string `json:"name"`
+				Type   string `json:"type"`
+				Hook   string `json:"hook"`
+				Prio   *int   `json:"prio"`
+				Policy string `json:"policy"`
+			} `json:"chain"`
+			Rule *struct {
+				Family string            `json:"family"`
+				Table  string            `json:"table"`
+				Chain  string            `json:"chain"`
+				Expr   []json.RawMessage `json:"expr"`
+			} `json:"rule"`
+		}
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return fmt.Errorf("decode nftables object: %w", err)
+		}
+		if object.Table != nil &&
+			object.Table.Family == TableFamily &&
+			object.Table.Name == TableName {
+			tablePresent = true
+		}
+		if object.Set != nil &&
+			object.Set.Family == TableFamily &&
+			object.Set.Table == TableName &&
+			object.Set.Name == SetName {
+			if object.Set.Comment == OwnershipComment {
+				ownedSetPresent = true
+			}
+			if nftExpressionIsNonEmpty(object.Set.Elem) {
+				setHasElements = true
+			}
+		}
+		if object.Element != nil &&
+			object.Element.Family == TableFamily &&
+			object.Element.Table == TableName &&
+			object.Element.Name == SetName &&
+			nftExpressionIsNonEmpty(object.Element.Elem) {
+			setHasElements = true
+		}
+		if object.Chain != nil &&
+			object.Chain.Family == TableFamily &&
+			object.Chain.Table == TableName &&
+			object.Chain.Name == ChainName &&
+			object.Chain.Type == "filter" &&
+			object.Chain.Hook == "input" &&
+			object.Chain.Prio != nil &&
+			*object.Chain.Prio == -10 &&
+			object.Chain.Policy == "accept" {
+			correctInputChain = true
+		}
+		if object.Rule != nil &&
+			object.Rule.Family == TableFamily &&
+			object.Rule.Table == TableName &&
+			object.Rule.Chain == ChainName {
+			for port := range matchingDropRulePorts(object.Rule.Expr) {
+				coveredPorts[port] = struct{}{}
+			}
+			if !requiredPortsAreCovered(requiredPorts, coveredPorts) &&
+				isUnconditionalTerminatingRule(object.Rule.Expr) {
+				terminatingRuleBeforeCoverage = true
+			}
+			if acceptsUncoveredBlockedTraffic(
+				object.Rule.Expr,
+				requiredPorts,
+				coveredPorts,
+			) {
+				acceptRuleBeforeCoverage = true
+			}
+		}
+	}
+
+	switch {
+	case !tablePresent:
+		return fmt.Errorf("%w: table is missing", ErrTableUnhealthy)
+	case !ownedSetPresent:
+		return fmt.Errorf("%w: ownership marker is missing", ErrTableUnhealthy)
+	case !setHasElements:
+		return fmt.Errorf("%w: %s set is empty", ErrTableUnhealthy, SetName)
+	case !correctInputChain:
+		return fmt.Errorf("%w: input filter base chain is missing or incorrect", ErrTableUnhealthy)
+	case terminatingRuleBeforeCoverage:
+		return fmt.Errorf(
+			"%w: an unconditional terminating rule precedes complete port coverage",
+			ErrTableUnhealthy,
+		)
+	case acceptRuleBeforeCoverage:
+		return fmt.Errorf(
+			"%w: an accept rule permits required CN traffic before complete port coverage",
+			ErrTableUnhealthy,
+		)
+	}
+	for port := range requiredPorts {
+		if _, covered := coveredPorts[port]; !covered {
+			return fmt.Errorf("%w: port %d is not covered by a drop rule", ErrTableUnhealthy, port)
+		}
+	}
+	return nil
+}
+
+func requiredPortsAreCovered(required, covered map[int]struct{}) bool {
+	for port := range required {
+		if _, exists := covered[port]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func nftExpressionIsNonEmpty(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return false
+	}
+	switch value := value.(type) {
+	case nil:
+		return false
+	case []any:
+		return len(value) > 0
+	default:
+		return true
+	}
+}
+
+func matchingDropRulePorts(expressions []json.RawMessage) map[int]struct{} {
+	var sourceMatches, portMatches int
+	var drop bool
+	ports := make(map[int]struct{})
+	for _, raw := range expressions {
+		var statement map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &statement); err != nil || len(statement) != 1 {
+			return nil
+		}
+		if _, exists := statement["drop"]; exists {
+			drop = true
+			continue
+		}
+		if _, exists := statement["counter"]; exists {
+			continue
+		}
+
+		matchRaw, exists := statement["match"]
+		if !exists {
+			return nil
+		}
+		var match struct {
+			Op    string          `json:"op"`
+			Left  json.RawMessage `json:"left"`
+			Right json.RawMessage `json:"right"`
+		}
+		if err := json.Unmarshal(matchRaw, &match); err != nil ||
+			(match.Op != "==" && match.Op != "in") {
+			return nil
+		}
+		switch {
+		case isPayloadExpression(match.Left, "ip", "saddr") &&
+			rawJSONString(match.Right) == "@"+SetName:
+			sourceMatches++
+		case isPayloadExpression(match.Left, "tcp", "dport"):
+			portMatches++
+			for port := range nftPortValues(match.Right) {
+				ports[port] = struct{}{}
+			}
+		default:
+			return nil
+		}
+	}
+	if sourceMatches != 1 || portMatches != 1 || !drop {
+		return nil
+	}
+	return ports
+}
+
+func isUnconditionalTerminatingRule(expressions []json.RawMessage) bool {
+	terminates := false
+	for _, raw := range expressions {
+		var statement map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &statement); err != nil || len(statement) != 1 {
+			return false
+		}
+		for name := range statement {
+			switch name {
+			case "counter", "log", "continue":
+			case "accept", "drop", "reject", "return", "queue", "jump", "goto":
+				terminates = true
+			default:
+				return false
+			}
+		}
+	}
+	return terminates
+}
+
+func acceptsUncoveredBlockedTraffic(
+	expressions []json.RawMessage,
+	requiredPorts map[int]struct{},
+	coveredPorts map[int]struct{},
+) bool {
+	var accept, sourceMatches, portMatches int
+	ports := make(map[int]struct{})
+	for _, raw := range expressions {
+		var statement map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &statement); err != nil || len(statement) != 1 {
+			return false
+		}
+		if _, exists := statement["accept"]; exists {
+			accept++
+			continue
+		}
+		if _, exists := statement["counter"]; exists {
+			continue
+		}
+		if _, exists := statement["log"]; exists {
+			continue
+		}
+
+		matchRaw, exists := statement["match"]
+		if !exists {
+			return false
+		}
+		var match struct {
+			Op    string          `json:"op"`
+			Left  json.RawMessage `json:"left"`
+			Right json.RawMessage `json:"right"`
+		}
+		if err := json.Unmarshal(matchRaw, &match); err != nil ||
+			(match.Op != "==" && match.Op != "in") {
+			return false
+		}
+		switch {
+		case isPayloadExpression(match.Left, "ip", "saddr") &&
+			rawJSONString(match.Right) == "@"+SetName:
+			sourceMatches++
+		case isPayloadExpression(match.Left, "tcp", "dport"):
+			portMatches++
+			for port := range nftPortValues(match.Right) {
+				ports[port] = struct{}{}
+			}
+		default:
+			return false
+		}
+	}
+	if accept != 1 ||
+		sourceMatches > 1 ||
+		portMatches > 1 ||
+		(sourceMatches == 0 && portMatches == 0) {
+		return false
+	}
+	if portMatches == 0 {
+		return !requiredPortsAreCovered(requiredPorts, coveredPorts)
+	}
+	for port := range ports {
+		if _, required := requiredPorts[port]; !required {
+			continue
+		}
+		if _, covered := coveredPorts[port]; !covered {
+			return true
+		}
+	}
+	return false
+}
+
+func isPayloadExpression(raw json.RawMessage, protocol, field string) bool {
+	var expression struct {
+		Payload *struct {
+			Protocol string `json:"protocol"`
+			Field    string `json:"field"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(raw, &expression); err != nil || expression.Payload == nil {
+		return false
+	}
+	return expression.Payload.Protocol == protocol && expression.Payload.Field == field
+}
+
+func rawJSONString(raw json.RawMessage) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func nftPortValues(raw json.RawMessage) map[int]struct{} {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil
+	}
+	ports := make(map[int]struct{})
+	collectNFTPorts(value, ports)
+	return ports
+}
+
+func collectNFTPorts(value any, ports map[int]struct{}) {
+	switch value := value.(type) {
+	case json.Number:
+		port, err := strconv.Atoi(value.String())
+		if err == nil && port >= minPort && port <= maxPort {
+			ports[port] = struct{}{}
+		}
+	case []any:
+		for _, child := range value {
+			collectNFTPorts(child, ports)
+		}
+	case map[string]any:
+		if set, exists := value["set"]; exists {
+			collectNFTPorts(set, ports)
+		}
+		if values, exists := value["range"].([]any); exists && len(values) == 2 {
+			first, firstOK := nftPortNumber(values[0])
+			last, lastOK := nftPortNumber(values[1])
+			if firstOK && lastOK && first <= last {
+				for port := first; port <= last; port++ {
+					ports[port] = struct{}{}
+				}
+			}
+		}
+	}
+}
+
+func nftPortNumber(value any) (int, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	port, err := strconv.Atoi(number.String())
+	if err != nil || port < minPort || port > maxPort {
+		return 0, false
+	}
+	return port, true
 }
 
 // Render writes one complete nft -f batch for one blocked listener port.

@@ -142,6 +142,17 @@ func parseKernelPort(value string) (int, error) {
 // wrapping at Max. Reserved ports are never probed. Only EADDRINUSE advances
 // to the next candidate; any other bind failure is returned immediately.
 func SelectAvailable(reserved io.Reader, start int, check CheckFunc) (int, error) {
+	return SelectAvailableExcluding(reserved, start, nil, check)
+}
+
+// SelectAvailableExcluding behaves like SelectAvailable and also skips ports
+// already assigned to another Socks-VPS instance.
+func SelectAvailableExcluding(
+	reserved io.Reader,
+	start int,
+	excluded map[int]struct{},
+	check CheckFunc,
+) (int, error) {
 	if err := Validate(start); err != nil {
 		return 0, fmt.Errorf("automatic port start: %w", err)
 	}
@@ -167,6 +178,9 @@ func SelectAvailable(reserved io.Reader, start int, check CheckFunc) (int, error
 		if reservedPorts.Contains(candidate) {
 			continue
 		}
+		if _, exists := excluded[candidate]; exists {
+			continue
+		}
 
 		err := check(candidate)
 		switch {
@@ -185,6 +199,12 @@ func SelectAvailable(reserved io.Reader, start int, check CheckFunc) (int, error
 // SelectAutomatic reads Linux's authoritative reserved-port list, chooses a
 // random starting point, and performs real tcp4 bind checks.
 func SelectAutomatic() (int, error) {
+	return SelectAutomaticExcluding(nil)
+}
+
+// SelectAutomaticExcluding selects an automatic port while skipping the
+// supplied listener ports.
+func SelectAutomaticExcluding(excluded map[int]struct{}) (int, error) {
 	reserved, err := os.Open(ReservedPortsPath)
 	if err != nil {
 		return 0, fmt.Errorf("open system-reserved ports %s: %w", ReservedPortsPath, err)
@@ -195,7 +215,7 @@ func SelectAutomatic() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return SelectAvailable(reserved, start, CheckAvailable)
+	return SelectAvailableExcluding(reserved, start, excluded, CheckAvailable)
 }
 
 func randomStart() (int, error) {

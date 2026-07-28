@@ -585,13 +585,30 @@ func portCheckCommand(args []string, stdout, stderr io.Writer) (int, error) {
 
 func portSelectCommand(args []string, stdout, stderr io.Writer) (int, error) {
 	flags := newFlagSet("port-select", stderr)
+	configDirectory := flags.String(
+		"config-dir",
+		"",
+		"directory containing *.json configurations whose ports must be excluded",
+	)
 	if err := flags.Parse(args); err != nil {
 		return flagExitCode(err), flagError(err)
 	}
 	if err := requireNoPositionals(flags); err != nil {
 		return exitConfigError, err
 	}
-	selected, err := port.SelectAutomatic()
+
+	var excluded map[int]struct{}
+	if *configDirectory != "" {
+		configs, err := config.LoadDirectory(*configDirectory)
+		if err != nil {
+			return exitConfigError, err
+		}
+		excluded = make(map[int]struct{}, len(configs))
+		for _, cfg := range configs {
+			excluded[cfg.Port] = struct{}{}
+		}
+	}
+	selected, err := port.SelectAutomaticExcluding(excluded)
 	if err != nil {
 		return exitRuntimeError, err
 	}
@@ -638,6 +655,7 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 		"path to nft --json list table ip socks_vps output",
 	)
 	remove := flags.Bool("remove", false, "render removal of an owned table")
+	checkHealth := flags.Bool("check-health", false, "check required live nftables state")
 	if err := flags.Parse(args); err != nil {
 		return flagExitCode(err), flagError(err)
 	}
@@ -650,6 +668,42 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 			allowCNSet = true
 		}
 	})
+	if *checkHealth {
+		if *remove ||
+			*portNumber != 0 ||
+			allowCNSet ||
+			*zonePath != "" ||
+			*outputPath != "" {
+			return exitConfigError, errors.New(
+				"firewall-render --check-health cannot be combined with --remove, --port, --allow-cn, --zone, or --output",
+			)
+		}
+		if (*configPath == "") == (*configDirectory == "") {
+			return exitConfigError, errors.New(
+				"firewall-render --check-health requires exactly one of --config or --config-dir",
+			)
+		}
+		if *existingPath == "" {
+			return exitConfigError, errors.New(
+				"firewall-render --check-health requires --existing-table-json",
+			)
+		}
+
+		configs, err := loadConfigs("firewall-render --check-health", *configPath, *configDirectory)
+		if err != nil {
+			return exitConfigError, err
+		}
+		var blockedPorts []int
+		for _, cfg := range configs {
+			if !cfg.AllowCN {
+				blockedPorts = append(blockedPorts, cfg.Port)
+			}
+		}
+		if err := checkFirewallHealth(*existingPath, stdin, blockedPorts); err != nil {
+			return exitRuntimeError, err
+		}
+		return exitOK, nil
+	}
 	if *outputPath == "" {
 		return exitConfigError, errors.New("firewall-render requires --output")
 	}
@@ -758,6 +812,18 @@ func firewallRenderCommand(args []string, stdin io.Reader, stdout, stderr io.Wri
 		_, _ = io.WriteString(stdout, "firewall batch written\n")
 	}
 	return exitOK, nil
+}
+
+func checkFirewallHealth(path string, stdin io.Reader, blockedPorts []int) error {
+	if path == "-" {
+		return firewall.CheckHealth(stdin, blockedPorts)
+	}
+	document, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open existing nftables table JSON %s: %w", path, err)
+	}
+	defer document.Close()
+	return firewall.CheckHealth(document, blockedPorts)
 }
 
 func existingTableState(
