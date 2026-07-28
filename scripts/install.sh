@@ -714,7 +714,7 @@ check_or_reselect_port() {
         if [[ -d ${instances_dir} ]]; then
             "${package_binary}" port-select \
                 --config-dir "${instances_dir}"
-            return
+            return $?
         fi
         printf '%s\n' "${port}"
         return 0
@@ -1460,8 +1460,10 @@ required_firewall_state_is_healthy() {
         require_nft=true
     fi
     if ! command -v nft >/dev/null 2>&1; then
-        [[ ${require_nft} == false ]]
-        return
+        if [[ ${require_nft} == false ]]; then
+            return 0
+        fi
+        return 1
     fi
     if existing_json=$(nft --json list table ip socks_vps 2>/dev/null); then
         if [[ ${require_nft} == true ]]; then
@@ -1470,12 +1472,14 @@ required_firewall_state_is_healthy() {
             else
                 health_config=(--config "${legacy_config_file}")
             fi
-            printf '%s\n' "${existing_json}" |
+            if printf '%s\n' "${existing_json}" |
                 "${package_binary}" firewall-render \
                     --check-health \
                     "${health_config[@]}" \
-                    --existing-table-json - >/dev/null 2>&1
-            return
+                    --existing-table-json - >/dev/null 2>&1; then
+                return 0
+            fi
+            return 1
         fi
         removal_batch=$(
             printf '%s\n' "${existing_json}" |
@@ -1485,11 +1489,15 @@ required_firewall_state_is_healthy() {
                     --output - 2>/dev/null
         ) || return 1
         if [[ ${require_nft} == true ]]; then
-            [[ -n ${removal_batch} ]]
-        else
-            [[ -z ${removal_batch} ]]
+            if [[ -n ${removal_batch} ]]; then
+                return 0
+            fi
+            return 1
         fi
-        return
+        if [[ -z ${removal_batch} ]]; then
+            return 0
+        fi
+        return 1
     fi
     tables=$(nft list tables 2>/dev/null) || return 1
     if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
