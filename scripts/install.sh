@@ -1517,6 +1517,9 @@ start_and_verify() {
 
     while ((attempt <= 2)); do
         start_status=0
+        systemctl reset-failed \
+            socks-vps.service \
+            socks-vps-firewall.service
         systemctl start socks-vps.service || start_status=$?
         verify_status=1
         if [[ ${start_status} == 0 ]]; then
@@ -1550,7 +1553,6 @@ start_and_verify() {
         fi
 
         note "自动端口 ${port} 在绑定前被占用，重新选择一次"
-        systemctl reset-failed socks-vps.service
         port=$(
             "${package_binary}" port-select \
                 --config-dir "${instances_dir}"
@@ -1578,6 +1580,9 @@ start_preserved_and_verify() {
     local verify_status=1
     local exec_status
 
+    systemctl reset-failed \
+        socks-vps.service \
+        socks-vps-firewall.service
     systemctl start socks-vps.service || start_status=$?
     if [[ ${start_status} == 0 ]]; then
         if verify_active_installation; then
