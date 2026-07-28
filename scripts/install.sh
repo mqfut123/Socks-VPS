@@ -854,6 +854,11 @@ rollback_transaction() {
     if ! systemctl daemon-reload; then
         failed=true
     fi
+    if ! systemctl reset-failed \
+        socks-vps.service \
+        socks-vps-firewall.service; then
+        failed=true
+    fi
     if ! systemctl start socks-vps-firewall.service socks-vps.service; then
         failed=true
     elif ! verify_active_installation; then
