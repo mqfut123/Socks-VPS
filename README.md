@@ -25,7 +25,7 @@ TCP 端口 [回车 = 随机选择 1024-65535]：
 
 系统依赖齐全时，连续两次回车即可选择一个未占用端口、默认阻断中国大陆来源，并生成 20 位安全用户名和密码。缺少依赖时，安装器会在安装软件包前另行列出并确认。环境检查、安装包校验和服务自检会显示为简短的彩色状态；用于管道或 systemd 日志时自动改为普通文本，不输出颜色控制符。
 
-完成后直接显示连接信息：
+完成后直接显示连接信息和管理菜单入口：
 
 ```text
 ✓ Socks-VPS 已就绪
@@ -35,6 +35,8 @@ TCP 端口 [回车 = 随机选择 1024-65535]：
 密码：qP9kD2wR7xM4bV8nC5zT
 配置名称：socks-1
 中国大陆来源：已拦截
+
+• 打开管理菜单：sudo socks-vpsctl
 ```
 
 公网 IPv4 查询失败时，服务器地址会显示“请填写 VPS 公网 IPv4”，不会把 NAT 私网地址当作连接地址。
@@ -46,11 +48,11 @@ TCP 端口 [回车 = 随机选择 1024-65535]：
 ```bash
 sudo socks-vpsctl list
 sudo socks-vpsctl add
-sudo socks-vpsctl credentials socks-1
-sudo socks-vpsctl remove socks-2
+sudo socks-vpsctl credentials
+sudo socks-vpsctl remove
 ```
 
-`add` 同样只问端口和大陆阻断选项，并自动生成新凭据。`credentials` 可以自行输入新用户名和密码，任一字段直接回车则重新生成 20 位安全值。
+`add` 同样只问端口和大陆阻断选项，并自动生成新凭据。`credentials` 可以自行输入新用户名和密码，任一字段直接回车则重新生成 20 位安全值。修改或删除时，只有一个 SOCKS 会直接选中；存在多个 SOCKS 时会按 `1、2、3…` 列出并要求输入序号。也可以使用 `sudo socks-vpsctl credentials socks-1` 或 `sudo socks-vpsctl remove socks-2` 直接指定配置。
 
 ## 为什么用 Socks-VPS
 
@@ -71,10 +73,10 @@ sudo socks-vpsctl list
 sudo socks-vpsctl add
 
 # 修改凭据
-sudo socks-vpsctl credentials socks-1
+sudo socks-vpsctl credentials
 
 # 永久删除一个配置
-sudo socks-vpsctl remove socks-2
+sudo socks-vpsctl remove
 
 # 更新到最新版本
 sudo socks-vpsctl update
@@ -86,7 +88,7 @@ sudo socks-vpsctl cleanup
 sudo socks-vpsctl uninstall
 ```
 
-不带参数运行 `sudo socks-vpsctl` 会进入中文交互菜单。`status` 会一起检查配置、systemd、监听归属、认证和所需防火墙状态；`list` 按配置逐项显示名称、端口和大陆来源设置。
+不带参数运行 `sudo socks-vpsctl` 会进入中文交互菜单。`status` 会一起检查配置、systemd、监听归属、认证和所需防火墙状态；`status` 和 `list` 都按配置逐项显示名称、端口、用户名、密码和大陆来源设置。
 
 成功执行 `remove` 后，对应配置会永久删除。最后一个 SOCKS 配置不能单独删除，需要时使用 `uninstall`。菜单中的重装会先明确提示，然后永久替换全部现有 SOCKS 配置。
 

@@ -1802,6 +1802,7 @@ read_config_detail() {
 print_instance_summary() {
     local name=$1
     local path=$2
+    local number=${3:-}
     local cn_text
 
     read_config_detail "${path}"
@@ -1810,8 +1811,14 @@ print_instance_summary() {
     else
         cn_text='已拦截'
     fi
-    printf '配置：%s\n' "${name}"
+    if [[ -n ${number} ]]; then
+        printf '%s) 配置：%s\n' "${number}" "${name}"
+    else
+        printf '配置：%s\n' "${name}"
+    fi
     printf '  端口：%s\n' "${detail_port}"
+    printf '  用户名：%s\n' "${detail_username}"
+    printf '  密码：%s\n' "${detail_password}"
     printf '  中国大陆来源：%s\n' "${cn_text}"
 }
 
@@ -1832,7 +1839,7 @@ list_instances() {
 
 select_instance_name() {
     local requested=${1:-}
-    local path
+    local path name index
     local -a paths
 
     if [[ -n ${requested} ]]; then
@@ -1853,13 +1860,18 @@ select_instance_name() {
         return
     fi
 
-    list_instances
-    IFS= read -r -p '配置名称：' requested
-    [[ ${requested} =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
-        die 'SOCKS 配置名称无效'
-    path="${instances_dir}/${requested}.json"
-    [[ -f ${path} ]] || die "SOCKS 配置不存在：${requested}"
-    selected_instance_name=${requested}
+    for ((index = 0; index < ${#paths[@]}; index++)); do
+        path=${paths[index]}
+        name=$(basename "${path}" .json)
+        print_instance_summary "${name}" "${path}" "$((index + 1))"
+    done
+    IFS= read -r -p '请选择 SOCKS 序号：' requested
+    [[ ${requested} =~ ^[1-9][0-9]*$ ]] ||
+        die 'SOCKS 序号无效'
+    ((requested <= ${#paths[@]})) ||
+        die "SOCKS 序号超出范围：${requested}"
+    path=${paths[requested - 1]}
+    selected_instance_name=$(basename "${path}" .json)
 }
 
 next_instance_name() {
@@ -1906,6 +1918,10 @@ print_connection_details() {
     printf '配置名称：%s\n' "${name}"
     printf '中国大陆来源：%s\n' "${cn_text}"
     printf '\n'
+}
+
+print_menu_hint() {
+    status_line info '打开管理菜单：sudo socks-vpsctl'
 }
 
 add_instance() {
@@ -2076,6 +2092,7 @@ privileged_apply() {
                 "${instance_name}" \
                 "${username}" \
                 "${password}"
+            print_menu_hint
             ;;
         add)
             add_instance \
