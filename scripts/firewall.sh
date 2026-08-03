@@ -186,6 +186,10 @@ apply_rules() {
         [[ -z ${blocked_ports} ]] && return 0
         die '存在拦截中国大陆来源的端口，但系统未找到 nft'
     fi
+    if ! nft list tables >/dev/null 2>&1; then
+        [[ -z ${blocked_ports} ]] && return 0
+        die '存在拦截中国大陆来源的端口，但 nft 无法使用'
+    fi
 
     table_state=$(capture_existing_table)
     render_apply_batch "${table_state}" "${blocked_ports}"
@@ -210,6 +214,15 @@ remove_rules() {
         fi
         if [[ -n ${blocked_ports} ]]; then
             die '存在拦截中国大陆来源的端口，但系统未找到 nft'
+        fi
+        return 0
+    fi
+    if ! nft list tables >/dev/null 2>&1; then
+        if ! blocked_ports=$(blocked_cn_ports); then
+            die '无法读取大陆来源阻断配置，且 nft 无法使用'
+        fi
+        if [[ -n ${blocked_ports} ]]; then
+            die '存在拦截中国大陆来源的端口，但 nft 无法使用'
         fi
         return 0
     fi

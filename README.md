@@ -33,7 +33,7 @@ TCP 端口 [回车 = 随机选择 1024-65535]：
 用户名：2mX7rQ9vK4cN8pL5tH3s
 密码：qP9kD2wR7xM4bV8nC5zT
 配置名称：socks-1
-中国大陆来源：已拦截
+中国大陆来源阻断：开启
 
 • 打开管理菜单：sudo socks-vpsctl
 ```

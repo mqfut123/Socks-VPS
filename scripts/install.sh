@@ -699,29 +699,37 @@ ensure_system_dependencies() {
     if [[ ${dependency_need_ss} == true ]] && ! command -v ss >/dev/null 2>&1; then
         dependencies_present=false
     fi
-    if [[ ${dependencies_present} == true ]]; then
-        return
+    if [[ ${dependencies_present} == false ]]; then
+        manager=$(detect_package_manager)
+        while IFS= read -r package; do
+            [[ -n ${package} ]] && packages+=("${package}")
+        done < <(missing_system_dependency_packages \
+            "${manager}" "${dependency_need_nft}" "${dependency_need_ss}")
+        if ((${#packages[@]} > 0)); then
+            note "正在通过 ${manager} 安装所需系统软件包"
+            case ${manager} in
+                apt)
+                    apt-get update
+                    apt-get install -y "${packages[@]}"
+                    ;;
+                dnf)
+                    dnf install -y "${packages[@]}"
+                    ;;
+                yum)
+                    yum install -y "${packages[@]}"
+                    ;;
+            esac
+        fi
     fi
 
-    manager=$(detect_package_manager)
-    while IFS= read -r package; do
-        [[ -n ${package} ]] && packages+=("${package}")
-    done < <(missing_system_dependency_packages \
-        "${manager}" "${dependency_need_nft}" "${dependency_need_ss}")
-    ((${#packages[@]} > 0)) || return
-    note "正在通过 ${manager} 安装所需系统软件包"
-    case ${manager} in
-        apt)
-            apt-get update
-            apt-get install -y "${packages[@]}"
-            ;;
-        dnf)
-            dnf install -y "${packages[@]}"
-            ;;
-        yum)
-            yum install -y "${packages[@]}"
-            ;;
-    esac
+    if [[ ${dependency_need_nft} == true ]]; then
+        command -v nft >/dev/null 2>&1 || die '系统未找到 nft'
+        nft list tables >/dev/null 2>&1 || die 'nft 无法使用'
+    fi
+    if [[ ${dependency_need_ss} == true ]]; then
+        command -v ss >/dev/null 2>&1 || die '系统未找到 ss'
+        ss -H -ltn >/dev/null 2>&1 || die 'ss 无法使用'
+    fi
 }
 
 report_port_conflict() {
@@ -1157,13 +1165,14 @@ preflight_firewall() {
         return 0
     fi
 
-    if nft --json list table ip socks_vps >/dev/null 2>&1; then
-        table_state=present
-    else
-        tables=$(nft list tables) || die '无法检查 nftables 表'
-        if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
+    if ! tables=$(nft list tables 2>/dev/null); then
+        [[ ${require_nft} == false ]] && return 0
+        die '无法检查 nftables 表'
+    fi
+    if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
+        nft --json list table ip socks_vps >/dev/null 2>&1 ||
             die '无法读取现有的 table ip socks_vps'
-        fi
+        table_state=present
     fi
 
     render_args=(
@@ -1192,12 +1201,25 @@ preflight_firewall() {
 }
 
 require_socks_table_absent() {
-    local tables existing_json removal_batch
+    local blocked_ports tables existing_json removal_batch
 
     if ! command -v nft >/dev/null 2>&1; then
+        blocked_ports=$(blocked_cn_ports) ||
+            die '无法读取大陆来源阻断配置，且未找到 nft'
+        [[ -z ${blocked_ports} ]] ||
+            die '存在拦截中国大陆来源的端口，但系统未找到 nft'
         return 0
     fi
-    if existing_json=$(nft --json list table ip socks_vps 2>/dev/null); then
+    if ! tables=$(nft list tables 2>/dev/null); then
+        blocked_ports=$(blocked_cn_ports) ||
+            die '无法读取大陆来源阻断配置，且 nft 无法使用'
+        [[ -z ${blocked_ports} ]] ||
+            die '存在拦截中国大陆来源的端口，但 nft 无法使用'
+        return 0
+    fi
+    if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
+        existing_json=$(nft --json list table ip socks_vps 2>/dev/null) ||
+            die '现有 table ip socks_vps 无法读取'
         if ! removal_batch=$(
             printf '%s\n' "${existing_json}" |
                 "${package_binary}" firewall-render \
@@ -1211,10 +1233,6 @@ require_socks_table_absent() {
             die 'Socks-VPS 自有 nftables 表仍未移除'
         status_line info '检测到外部同名 nftables 表，已保持不变'
         return 0
-    fi
-    tables=$(nft list tables) || die '无法确认 nftables 表已移除'
-    if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
-        die '现有 table ip socks_vps 无法读取'
     fi
 }
 
@@ -1599,7 +1617,10 @@ required_firewall_state_is_healthy() {
         fi
         return 1
     fi
-    tables=$(nft list tables 2>/dev/null) || return 1
+    if ! tables=$(nft list tables 2>/dev/null); then
+        [[ ${require_nft} == false ]]
+        return
+    fi
     if grep -Eq '^[[:space:]]*table ip socks_vps[[:space:]]*$' <<<"${tables}"; then
         return 1
     fi
@@ -2040,7 +2061,11 @@ add_instance() {
         die '所选端口不可用'
     check_new_config_without_write \
         "${selected}" "${version}" "${username}" "${password}" "${allow_cn}"
-    preflight_firewall "${port_mode}" "${selected}" "${allow_cn}"
+    if [[ ${allow_cn} == true && ${dependency_need_nft} == true ]]; then
+        preflight_firewall preserve 0 false
+    else
+        preflight_firewall "${port_mode}" "${selected}" "${allow_cn}"
+    fi
     begin_transaction add
     stop_owned_services
     create_new_config \
@@ -2120,7 +2145,8 @@ change_instance_settings() {
 
 remove_instance() {
     local name=$1
-    local target
+    local path target
+    local remaining_requires_nft=false
     local -a paths
 
     require_owned_installation
@@ -2133,7 +2159,18 @@ remove_instance() {
         die '不能删除最后一组 SOCKS 配置，请使用 socks-vpsctl uninstall'
     target="${instances_dir}/${name}.json"
     [[ -f ${target} ]] || die "SOCKS 配置不存在：${name}"
+    for path in "${paths[@]}"; do
+        [[ ${path} == "${target}" ]] && continue
+        read_config_detail "${path}"
+        if [[ ${detail_allow_cn} == false ]]; then
+            remaining_requires_nft=true
+            break
+        fi
+    done
     ensure_system_dependencies remove false 0.0.0
+    if [[ ${remaining_requires_nft} == true ]]; then
+        preflight_firewall preserve 0 false
+    fi
     begin_transaction remove
     stop_owned_services
     rm -f -- "${target}"
