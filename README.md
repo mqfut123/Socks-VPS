@@ -14,7 +14,6 @@ bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download
 | 网络边界 | 仅监听和连接 IPv4 |
 | 默认凭据 | 安全随机用户名和密码，各 20 字符 |
 | 大陆阻断 | 可选，默认开启，在 TCP 握手前由 nftables 丢弃 |
-| 资源所有权 | 只管理 Socks-VPS 自有配置、服务和 nftables 表 |
 
 安装配置只问两件事：
 
@@ -52,11 +51,13 @@ sudo socks-vpsctl credentials
 sudo socks-vpsctl remove
 ```
 
-`add` 同样只问端口和大陆阻断选项，并自动生成新凭据。`credentials` 可以自行输入新用户名和密码，任一字段直接回车则重新生成 20 位安全值。修改或删除时，只有一个 SOCKS 会直接选中；存在多个 SOCKS 时会按 `1、2、3…` 列出并要求输入序号。也可以使用 `sudo socks-vpsctl credentials socks-1` 或 `sudo socks-vpsctl remove socks-2` 直接指定配置。
+`add` 同样只问端口和大陆阻断选项，并自动生成新凭据。`credentials` 进入“修改连接设置”：选定 SOCKS 后依次询问是否修改大陆来源阻断、用户名和密码，各项默认不修改，也可以一次修改多项。选择修改用户名或密码后，输入新值即可指定，直接回车才会重新生成 20 位安全值。选择修改大陆来源阻断后，回车或输入 `y` 开启阻断，输入 `n` 关闭阻断。没有选择任何设置时不会改动配置或重启服务。
+
+修改或删除时，只有一个 SOCKS 会直接选中；存在多个 SOCKS 时会按 `1、2、3…` 列出并要求输入序号。也可以使用 `sudo socks-vpsctl credentials socks-1` 或 `sudo socks-vpsctl remove socks-2` 直接指定配置。
 
 ## 为什么用 Socks-VPS
 
-- 独立 Go 核心，不依赖 Xray。
+- 单个 Go 核心统一运行全部 SOCKS 配置。
 - 开机自启，异常退出由 systemd 自动重启。
 - 只接受公网 IPv4 目标；拒绝 IPv6、UDP、BIND、私网、回环、本机地址、链路本地地址、云元数据和 IANA 特殊用途地址。
 - 手动端口冲突时显示占用者并停止；自动端口只在真实 bind 竞争时重新选择一次。
@@ -72,7 +73,7 @@ sudo socks-vpsctl list
 # 新增一个 SOCKS
 sudo socks-vpsctl add
 
-# 修改凭据
+# 修改连接设置
 sudo socks-vpsctl credentials
 
 # 永久删除一个配置
@@ -92,7 +93,7 @@ sudo socks-vpsctl uninstall
 
 成功执行 `remove` 后，对应配置会永久删除。最后一个 SOCKS 配置不能单独删除，需要时使用 `uninstall`。菜单中的重装会先明确提示，然后永久替换全部现有 SOCKS 配置。
 
-`cleanup` 会清理 Socks-VPS 自有的运行时临时文件、历史备份、旧版本和未完成操作留下的精确残留，不停止服务，也不修改 SOCKS 配置。systemd journal 是系统共享日志，因此保持不变。
+`cleanup` 会清理运行时临时文件、历史备份、旧版本和未完成操作留下的残留。
 
 服务仍可用标准 systemd 命令管理：
 
@@ -104,15 +105,15 @@ sudo systemctl start socks-vps.service
 
 更新会保留所有端口、凭据和大陆阻断选项。操作未完成时，脚本只在当前进程内恢复本次操作前的状态；成功后不保留快照、备份目录或 `restore` 命令。
 
-永久卸载会先确认安装资源确实属于 Socks-VPS，再停止服务并移除全部配置、版本、命令、systemd unit、自有 nftables 表、运行目录、历史备份以及专用用户和组。
+永久卸载会停止 Socks-VPS，并移除全部 SOCKS 配置、程序版本、管理命令、systemd unit、Socks-VPS 防火墙规则、运行目录、历史备份以及专用用户和组。
 
 ## 大陆来源阻断
 
-默认规则使用随版本打包的 IPdeny CN IPv4 网段，只对启用阻断的 SOCKS TCP 端口执行 `drop`。未命中的流量继续经过主机原有 nftables、firewalld、UFW 和云防火墙规则。
+默认规则使用随版本打包的 IPdeny CN IPv4 网段，只对启用阻断的 SOCKS TCP 端口执行 `drop`。安装和修改连接设置时，回车或输入 `y` 开启阻断；输入 `n` 后，对应端口不会生成 Socks-VPS 的大陆来源 `drop` 规则。
 
-项目使用独立的 `table ip socks_vps`，不添加全局 `accept`，不修改默认策略，也不会接管 WARP VPS Manager 的服务、端口、网卡、路由或 `table inet warp_vps`。同名 nftables 表只有带项目所有权标记时才会被替换或删除。
+该选项只控制 Socks-VPS 的大陆来源规则；端口能否从公网连接仍取决于主机和云平台的其他防火墙设置。阻断规则位于 `table ip socks_vps`，全部 SOCKS 都允许大陆来源时不保留 Socks-VPS 创建的阻断表。
 
-即使全部配置都关闭大陆阻断，Socks-VPS 仍把 nftables 作为安装和生命周期依赖，但不会因此创建拦截规则，也不会操作外部同名表。
+全新安装时，如果选择 `n` 且没有其他 SOCKS 启用大陆阻断，安装器不会要求安装 nftables。
 
 ## 支持环境
 
@@ -121,7 +122,9 @@ sudo systemctl start socks-vps.service
 - IPv4 网络
 - `curl`、`tar` 和 `sha256sum`
 
-缺少 `nft`、`ip` 或 `ss` 时，安装器会列出需要安装的软件包，回车确认后通过 APT、DNF 或 YUM 只安装缺少的依赖；输入 `n` 或 `N` 会取消当前操作。手动指定的端口若已被占用，安装会显示占用者并停止；自动模式会先避开监听端口和已有 SOCKS 配置端口，真实绑定竞争时只重新选择一次。
+安装器按当前操作检查依赖：启动或验证 SOCKS 监听时需要 `ss`；启用或撤销大陆来源阻断、检查卸载范围时需要 `nft`；不要求 `ip`。缺少依赖时，安装器会列出需要安装的软件包，回车确认后通过 APT、DNF 或 YUM 只安装缺少的部分；输入 `n` 或 `N` 会取消当前操作。
+
+手动指定的端口若已被占用，安装会显示占用者并停止；自动模式会先避开监听端口和已有 SOCKS 配置端口，真实绑定竞争时只重新选择一次。
 
 ## 配置与资源
 

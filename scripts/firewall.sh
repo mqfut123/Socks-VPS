@@ -202,10 +202,16 @@ apply_rules() {
 }
 
 remove_rules() {
-    local table_state
+    local blocked_ports table_state
 
     if ! nft_available; then
-        die '未找到 nft，无法确认并移除自有 nftables 表'
+        if ! blocked_ports=$(blocked_cn_ports); then
+            die '无法读取大陆来源阻断配置，且未找到 nft'
+        fi
+        if [[ -n ${blocked_ports} ]]; then
+            die '存在拦截中国大陆来源的端口，但系统未找到 nft'
+        fi
+        return 0
     fi
 
     table_state=$(capture_existing_table)

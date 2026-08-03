@@ -214,8 +214,26 @@ generate_secret_pair() {
     exec {descriptor}<&-
 }
 
-read_replacement_secret_pair() {
-    local requested_username requested_password
+confirm_setting_change() {
+    local prompt=$1
+    local answer
+
+    IFS= read -r -p "${prompt}？[y/N]：" answer
+    case ${answer:-n} in
+        y | Y | yes | YES | Yes)
+            return 0
+            ;;
+        n | N | no | NO | No)
+            return 1
+            ;;
+        *)
+            die '请输入 y 或 n'
+            ;;
+    esac
+}
+
+generate_secret_component() {
+    local component=$1
     local generated_username generated_password descriptor
 
     exec {descriptor}< <("${package_binary}" credentials-generate)
@@ -224,12 +242,42 @@ read_replacement_secret_pair() {
     IFS= read -r -d '' generated_password <&"${descriptor}" ||
         die '无法生成密码'
     exec {descriptor}<&-
+    case ${component} in
+        username)
+            printf '%s\n' "${generated_username}"
+            ;;
+        password)
+            printf '%s\n' "${generated_password}"
+            ;;
+        *)
+            die "未知的随机凭据字段：${component}"
+            ;;
+    esac
+}
 
-    IFS= read -r -p '新用户名 [回车 = 安全随机值]：' requested_username
-    IFS= read -r -s -p '新密码 [回车 = 安全随机值]：' requested_password
-    printf '\n'
-    selected_username=${requested_username:-${generated_username}}
-    selected_password=${requested_password:-${generated_password}}
+choose_connection_settings() {
+    local requested
+
+    if confirm_setting_change '修改大陆来源阻断'; then
+        choose_cn_access
+    fi
+    if confirm_setting_change '修改用户名'; then
+        IFS= read -r -p '新用户名 [回车 = 安全随机值]：' requested
+        if [[ -n ${requested} ]]; then
+            selected_username=${requested}
+        else
+            selected_username=$(generate_secret_component username)
+        fi
+    fi
+    if confirm_setting_change '修改密码'; then
+        IFS= read -r -s -p '新密码 [回车 = 安全随机值]：' requested
+        printf '\n'
+        if [[ -n ${requested} ]]; then
+            selected_password=${requested}
+        else
+            selected_password=$(generate_secret_component password)
+        fi
+    fi
 }
 
 check_new_config_without_write() {
@@ -356,7 +404,7 @@ choose_existing_action() {
     printf '  1) 查看状态与 SOCKS 列表\n'
     printf '  2) 更新\n'
     printf '  3) 新增 SOCKS\n'
-    printf '  4) 修改凭据\n'
+    printf '  4) 修改连接设置\n'
     printf '  5) 删除 SOCKS\n'
     printf '  6) 重装并永久替换全部 SOCKS 配置\n'
     printf '  7) 清理日志\n'
@@ -437,7 +485,6 @@ print_impact() {
             return
             ;;
     esac
-    printf 'WARP VPS Manager 不会被修改，共享系统软件包不会被删除。\n'
 }
 
 confirm_action() {
@@ -460,9 +507,7 @@ run_privileged() {
     if [[ ${action} == uninstall ]]; then
         require_owned_installation false
     fi
-    if [[ ${action} != cleanup ]]; then
-        confirm_system_dependency_installation
-    fi
+    confirm_system_dependency_installation "${action}" "${allow_cn}" "${version}"
 
     if [[ ${EUID} -eq 0 ]]; then
         privileged_apply \
@@ -506,14 +551,75 @@ detect_package_manager() {
     fi
 }
 
+action_dependency_requirements() {
+    local action=$1
+    local allow_cn=$2
+    local version=$3
+    local installed_version_file main_pid
+
+    dependency_need_nft=false
+    dependency_need_ss=false
+    if [[ ${action} == update ]]; then
+        installed_version_file=
+        if [[ -L ${current_link} ]]; then
+            installed_version_file="$(readlink -f "${current_link}")/VERSION"
+        fi
+        if [[ -r ${installed_version_file} &&
+              $(<"${installed_version_file}") == "${version}" ]]; then
+            return
+        fi
+    fi
+
+    case ${action} in
+        install)
+            dependency_need_ss=true
+            if [[ ${allow_cn} == false ]]; then
+                dependency_need_nft=true
+            fi
+            ;;
+        update)
+            dependency_need_ss=true
+            if configuration_requires_nft; then
+                dependency_need_nft=true
+            fi
+            ;;
+        reinstall | add | credentials)
+            dependency_need_ss=true
+            if [[ ${allow_cn} == false ]] || configuration_requires_nft; then
+                dependency_need_nft=true
+            fi
+            ;;
+        remove)
+            dependency_need_ss=true
+            if configuration_requires_nft; then
+                dependency_need_nft=true
+            fi
+            ;;
+        uninstall)
+            dependency_need_nft=true
+            main_pid=$(systemctl show socks-vps.service --property=MainPID --value 2>/dev/null || :)
+            if [[ ${main_pid} =~ ^[1-9][0-9]*$ ]]; then
+                dependency_need_ss=true
+            fi
+            ;;
+        cleanup)
+            ;;
+        *)
+            die "无法判断操作依赖：${action}"
+            ;;
+    esac
+    return 0
+}
+
 missing_system_dependency_packages() {
     local manager=$1
+    local need_nft=$2
+    local need_ss=$3
 
-    if ! command -v nft >/dev/null 2>&1; then
+    if [[ ${need_nft} == true ]] && ! command -v nft >/dev/null 2>&1; then
         printf '%s\n' nftables
     fi
-    if ! command -v ss >/dev/null 2>&1 ||
-       ! command -v ip >/dev/null 2>&1; then
+    if [[ ${need_ss} == true ]] && ! command -v ss >/dev/null 2>&1; then
         case ${manager} in
             apt)
                 printf '%s\n' iproute2
@@ -526,19 +632,32 @@ missing_system_dependency_packages() {
 }
 
 confirm_system_dependency_installation() {
+    local action=$1
+    local allow_cn=$2
+    local version=$3
     local manager answer package package_text=
+    local dependencies_present=true
     local -a packages=()
 
-    if command -v nft >/dev/null 2>&1 &&
-       command -v ss >/dev/null 2>&1 &&
-       command -v ip >/dev/null 2>&1; then
+    action_dependency_requirements "${action}" "${allow_cn}" "${version}"
+    if [[ ${dependency_need_nft} == false && ${dependency_need_ss} == false ]]; then
+        return
+    fi
+    if [[ ${dependency_need_nft} == true ]] && ! command -v nft >/dev/null 2>&1; then
+        dependencies_present=false
+    fi
+    if [[ ${dependency_need_ss} == true ]] && ! command -v ss >/dev/null 2>&1; then
+        dependencies_present=false
+    fi
+    if [[ ${dependencies_present} == true ]]; then
         return
     fi
 
     manager=$(detect_package_manager)
     while IFS= read -r package; do
         [[ -n ${package} ]] && packages+=("${package}")
-    done < <(missing_system_dependency_packages "${manager}")
+    done < <(missing_system_dependency_packages \
+        "${manager}" "${dependency_need_nft}" "${dependency_need_ss}")
     ((${#packages[@]} > 0)) || return
     for package in "${packages[@]}"; do
         if [[ -n ${package_text} ]]; then
@@ -563,19 +682,32 @@ confirm_system_dependency_installation() {
 }
 
 ensure_system_dependencies() {
+    local action=$1
+    local allow_cn=$2
+    local version=$3
     local manager package
+    local dependencies_present=true
     local -a packages=()
 
-    if command -v nft >/dev/null 2>&1 &&
-       command -v ss >/dev/null 2>&1 &&
-       command -v ip >/dev/null 2>&1; then
+    action_dependency_requirements "${action}" "${allow_cn}" "${version}"
+    if [[ ${dependency_need_nft} == false && ${dependency_need_ss} == false ]]; then
+        return
+    fi
+    if [[ ${dependency_need_nft} == true ]] && ! command -v nft >/dev/null 2>&1; then
+        dependencies_present=false
+    fi
+    if [[ ${dependency_need_ss} == true ]] && ! command -v ss >/dev/null 2>&1; then
+        dependencies_present=false
+    fi
+    if [[ ${dependencies_present} == true ]]; then
         return
     fi
 
     manager=$(detect_package_manager)
     while IFS= read -r package; do
         [[ -n ${package} ]] && packages+=("${package}")
-    done < <(missing_system_dependency_packages "${manager}")
+    done < <(missing_system_dependency_packages \
+        "${manager}" "${dependency_need_nft}" "${dependency_need_ss}")
     ((${#packages[@]} > 0)) || return
     note "正在通过 ${manager} 安装所需系统软件包"
     case ${manager} in
@@ -740,38 +872,6 @@ check_or_reselect_port() {
         printf '无法检查 TCP 端口 %s（退出码 %s）。\n' "${port}" "${status}" >&2
     fi
     return 1
-}
-
-show_coexistence_state() {
-    local unit warp_status warp_units
-    local firewall_detected=false
-
-    note '正在只读检查共存环境'
-    if warp_units=$(systemctl list-unit-files 'warp-vps*' --no-legend --no-pager 2>&1); then
-        if [[ -n ${warp_units} ]]; then
-            status_line info '检测到 WARP VPS Manager，保持不变'
-        fi
-    else
-        warp_status=$?
-        if [[ ${warp_status} != 1 || -n ${warp_units} ]]; then
-            [[ -z ${warp_units} ]] || printf '%s\n' "${warp_units}" >&2
-            printf '无法列出 WARP VPS Manager 服务。\n' >&2
-        fi
-    fi
-    for unit in nftables.service firewalld.service ufw.service; do
-        if systemctl is-active --quiet "${unit}"; then
-            firewall_detected=true
-        fi
-    done
-    if [[ ${firewall_detected} == true ]]; then
-        status_line info '检测到现有主机防火墙服务，保持不变'
-    fi
-    if command -v nft >/dev/null 2>&1; then
-        if nft list table inet warp_vps >/dev/null 2>&1; then
-            status_line info '检测到 WARP nftables 表，保持不变'
-        fi
-    fi
-    success '共存环境检查完成'
 }
 
 rollback_transaction() {
@@ -1636,17 +1736,15 @@ install_or_replace() {
         require_owned_installation
     fi
 
-    ensure_system_dependencies
     if [[ ${action} == update ]]; then
         installed_version_file="$(readlink -f "${current_link}")/VERSION"
         if [[ -r ${installed_version_file} &&
               $(<"${installed_version_file}") == "${version}" ]]; then
-            cleanup_legacy_artifacts
             success "Socks-VPS ${version} 已是当前版本"
             return
         fi
     fi
-    show_coexistence_state
+    ensure_system_dependencies "${action}" "${allow_cn}" "${version}"
 
     if [[ ${action} == install || ${action} == reinstall ]]; then
         if [[ ${action} == reinstall ]]; then
@@ -1732,7 +1830,7 @@ uninstall_permanently() {
     local main_pid listeners current_sockets
 
     require_owned_installation false
-    ensure_system_dependencies
+    ensure_system_dependencies uninstall false 0.0.0
     main_pid=$(systemctl show socks-vps.service --property=MainPID --value) ||
         die '无法读取 Socks-VPS 主服务进程状态'
     listeners=
@@ -1807,9 +1905,9 @@ print_instance_summary() {
 
     read_config_detail "${path}"
     if [[ ${detail_allow_cn} == true ]]; then
-        cn_text='不拦截'
+        cn_text='关闭'
     else
-        cn_text='已拦截'
+        cn_text='开启'
     fi
     if [[ -n ${number} ]]; then
         printf '%s) 配置：%s\n' "${number}" "${name}"
@@ -1819,7 +1917,7 @@ print_instance_summary() {
     printf '  端口：%s\n' "${detail_port}"
     printf '  用户名：%s\n' "${detail_username}"
     printf '  密码：%s\n' "${detail_password}"
-    printf '  中国大陆来源：%s\n' "${cn_text}"
+    printf '  中国大陆来源阻断：%s\n' "${cn_text}"
 }
 
 list_instances() {
@@ -1904,9 +2002,9 @@ print_connection_details() {
     read_config_detail "${instances_dir}/${name}.json"
     server_ip=$(detect_server_ipv4)
     if [[ ${detail_allow_cn} == true ]]; then
-        cn_text='不拦截'
+        cn_text='关闭'
     else
-        cn_text='已拦截'
+        cn_text='开启'
     fi
 
     printf '\n'
@@ -1916,7 +2014,7 @@ print_connection_details() {
     printf '用户名：%s\n' "${detail_username}"
     printf '密码：%s\n' "${detail_password}"
     printf '配置名称：%s\n' "${name}"
-    printf '中国大陆来源：%s\n' "${cn_text}"
+    printf '中国大陆来源阻断：%s\n' "${cn_text}"
     printf '\n'
 }
 
@@ -1937,7 +2035,7 @@ add_instance() {
     [[ -d ${instances_dir} ]] ||
         die '请先更新 Socks-VPS，再新增 SOCKS 配置'
     name=$(next_instance_name)
-    ensure_system_dependencies
+    ensure_system_dependencies add "${allow_cn}" "${version}"
     selected=$(check_or_reselect_port "${port_mode}" "${requested_port}") ||
         die '所选端口不可用'
     check_new_config_without_write \
@@ -1967,16 +2065,17 @@ add_instance() {
     print_connection_details "${name}"
 }
 
-change_instance_credentials() {
+change_instance_settings() {
     local name=$1
     local version=$2
     local username=$3
     local password=$4
+    local allow_cn=$5
     local target pending
 
     require_owned_installation
     [[ -d ${instances_dir} ]] ||
-        die '请先更新 Socks-VPS，再通过 socks-vpsctl 修改凭据'
+        die '请先更新 Socks-VPS，再通过 socks-vpsctl 修改连接设置'
     target="${instances_dir}/${name}.json"
     [[ -f ${target} ]] || die "SOCKS 配置不存在：${name}"
     read_config_detail "${target}"
@@ -1985,8 +2084,19 @@ change_instance_credentials() {
         "${version}" \
         "${username}" \
         "${password}" \
-        "${detail_allow_cn}"
-    ensure_system_dependencies
+        "${allow_cn}"
+    if [[ ${username} == "${detail_username}" &&
+          ${password} == "${detail_password}" &&
+          ${allow_cn} == "${detail_allow_cn}" ]]; then
+        success '连接设置未变化'
+        return
+    fi
+    ensure_system_dependencies credentials "${allow_cn}" "${version}"
+    if [[ ${detail_allow_cn} == true && ${allow_cn} == false ]]; then
+        preflight_firewall manual "${detail_port}" "${allow_cn}"
+    else
+        preflight_firewall preserve 0 false
+    fi
     begin_transaction credentials
     stop_owned_services
 
@@ -1995,7 +2105,7 @@ change_instance_credentials() {
     printf '%s\0%s\0' "${username}" "${password}" |
         "${package_binary}" config-create \
             --port "${detail_port}" \
-            --allow-cn="${detail_allow_cn}" \
+            --allow-cn="${allow_cn}" \
             --version "${version}" \
             --output "${pending}" >/dev/null
     chown root:socks-vps "${pending}"
@@ -2023,7 +2133,7 @@ remove_instance() {
         die '不能删除最后一组 SOCKS 配置，请使用 socks-vpsctl uninstall'
     target="${instances_dir}/${name}.json"
     [[ -f ${target} ]] || die "SOCKS 配置不存在：${name}"
-    ensure_system_dependencies
+    ensure_system_dependencies remove false 0.0.0
     begin_transaction remove
     stop_owned_services
     rm -f -- "${target}"
@@ -2041,7 +2151,6 @@ cleanup_logs() {
     cleanup_legacy_artifacts
     cleanup_runtime_artifacts
     success 'Socks-VPS 日志与临时残留已清理'
-    status_line info 'systemd journal 属于系统共享日志，未做清理'
 }
 
 run_latest_update() {
@@ -2104,11 +2213,12 @@ privileged_apply() {
                 "${password}"
             ;;
         credentials)
-            change_instance_credentials \
+            change_instance_settings \
                 "${instance_name}" \
                 "${version}" \
                 "${username}" \
-                "${password}"
+                "${password}" \
+                "${allow_cn}"
             ;;
         remove)
             remove_instance "${instance_name}"
@@ -2152,6 +2262,7 @@ interactive_main() {
     local version=0.0.0
 
     if installation_entry_exists; then
+        ensure_root_for_command
         choose_existing_action
     elif installation_detected; then
         die '检测到不完整或外部占用的 Socks-VPS 路径，请先检查后再安装'
@@ -2228,20 +2339,37 @@ direct_add() {
 
 direct_credentials() {
     local requested=${1:-}
-    local version
+    local version target
 
     version=$(read_package_version)
     installation_exists || die '尚未安装 Socks-VPS'
     [[ -d ${instances_dir} ]] ||
-        die '请先更新 Socks-VPS，再通过 socks-vpsctl 修改凭据'
+        die '请先更新 Socks-VPS，再通过 socks-vpsctl 修改连接设置'
     select_instance_name "${requested}"
-    read_replacement_secret_pair
+    target="${instances_dir}/${selected_instance_name}.json"
+    read_config_detail "${target}"
+    selected_username=${detail_username}
+    selected_password=${detail_password}
+    selected_allow_cn=${detail_allow_cn}
+    choose_connection_settings
+    if [[ ${selected_username} == "${detail_username}" &&
+          ${selected_password} == "${detail_password}" &&
+          ${selected_allow_cn} == "${detail_allow_cn}" ]]; then
+        success '连接设置未变化'
+        return
+    fi
+    check_new_config_without_write \
+        "${detail_port}" \
+        "${version}" \
+        "${selected_username}" \
+        "${selected_password}" \
+        "${selected_allow_cn}"
     run_privileged \
         credentials \
         preserve \
         0 \
         "${version}" \
-        false \
+        "${selected_allow_cn}" \
         "${selected_instance_name}" \
         "${selected_username}" \
         "${selected_password}"
@@ -2307,6 +2435,7 @@ main() {
             ;;
         add)
             [[ $# -eq 1 ]] || die '用法：socks-vpsctl add'
+            ensure_root_for_command "$@"
             direct_add
             ;;
         credentials)
@@ -2325,14 +2454,17 @@ main() {
             ;;
         --update)
             [[ $# -eq 1 ]] || die '用法：install.sh --update'
+            ensure_root_for_command "$@"
             direct_update
             ;;
         uninstall)
             [[ $# -eq 1 ]] || die '用法：socks-vpsctl uninstall'
+            ensure_root_for_command "$@"
             direct_uninstall
             ;;
         cleanup)
             [[ $# -eq 1 ]] || die '用法：socks-vpsctl cleanup'
+            ensure_root_for_command "$@"
             direct_cleanup
             ;;
         --privileged-apply)
