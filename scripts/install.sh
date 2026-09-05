@@ -821,13 +821,13 @@ current_service_owns_configured_listener() {
     local main_pid output expected_ports actual_ports
 
     if [[ -d ${instances_dir} ]]; then
-        "${public_binary}" self-check --config-dir "${instances_dir}" >/dev/null
+        "${public_binary}" self-check --config-dir "${instances_dir}" >/dev/null || return 1
         expected_ports=$(
             "${public_binary}" config-ports --config-dir "${instances_dir}" |
                 LC_ALL=C sort -n
         ) || return 1
     else
-        "${public_binary}" self-check --config "${legacy_config_file}" >/dev/null
+        "${public_binary}" self-check --config "${legacy_config_file}" >/dev/null || return 1
         expected_ports=$(
             "${public_binary}" config-port --config "${legacy_config_file}"
         ) || return 1

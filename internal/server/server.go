@@ -375,11 +375,21 @@ func (s *Server) dialApproved(ctx context.Context, ips []netip.Addr, port uint16
 	}
 	connectContext, cancel := context.WithTimeout(ctx, s.connectTimeout)
 	defer cancel()
+	deadline, _ := connectContext.Deadline()
 
 	var lastErr error
-	for _, ip := range ips {
+	for index, ip := range ips {
 		address := net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
-		conn, err := s.dialer.DialContext(connectContext, "tcp4", address)
+		// Share the remaining total budget among the remaining approved
+		// addresses, with net.Dialer's two-second minimum per attempt.
+		// The parent context still caps the total resolution/dial time.
+		attemptTimeout := time.Until(deadline) / time.Duration(len(ips)-index)
+		if attemptTimeout < 2*time.Second {
+			attemptTimeout = 2 * time.Second
+		}
+		attemptContext, cancelAttempt := context.WithTimeout(connectContext, attemptTimeout)
+		conn, err := s.dialer.DialContext(attemptContext, "tcp4", address)
+		cancelAttempt()
 		if err == nil {
 			return conn, nil
 		}
@@ -433,8 +443,12 @@ func ipv4BoundAddress(address net.Addr) *gosocks5.Addr {
 func relay(client, targetConn net.Conn) {
 	done := make(chan struct{}, 2)
 	copyHalf := func(destination, source net.Conn) {
-		_, _ = io.Copy(destination, source)
-		if writer, ok := destination.(interface{ CloseWrite() error }); ok {
+		if _, err := io.Copy(destination, source); err != nil {
+			// A failed direction cannot carry a later response. Close both
+			// sockets so the other copy does not wait on an idle peer.
+			_ = destination.Close()
+			_ = source.Close()
+		} else if writer, ok := destination.(interface{ CloseWrite() error }); ok {
 			_ = writer.CloseWrite()
 		}
 		done <- struct{}{}

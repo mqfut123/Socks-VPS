@@ -175,7 +175,10 @@ record_owned_table() {
 }
 
 owned_table_is_absent() {
-    ! nft list table ip socks_vps >/dev/null 2>&1
+    local table_state
+
+    table_state=$(capture_existing_table) || return 1
+    [[ ${table_state} == absent ]]
 }
 
 apply_rules() {
@@ -201,7 +204,7 @@ apply_rules() {
     if [[ -n ${blocked_ports} ]]; then
         record_owned_table
     elif ! owned_table_is_absent; then
-        die '关闭中国大陆来源拦截后，自有 nftables 表仍然存在'
+        die '关闭中国大陆来源拦截后，无法确认自有 nftables 表已移除'
     fi
 }
 
@@ -240,7 +243,7 @@ remove_rules() {
     apply_batch "${remove_file}"
 
     if ! owned_table_is_absent; then
-        die '自有 nftables 表移除后仍然存在'
+        die '无法确认自有 nftables 表已移除'
     fi
 }
 
