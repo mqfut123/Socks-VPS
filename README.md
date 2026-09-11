@@ -144,3 +144,7 @@ sudo systemctl start socks-vps.service
 ## License
 
 Socks-VPS 以 [MIT License](LICENSE) 发布。第三方许可和 IPdeny 数据来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 项目协作
+
+开发与维护从 [项目背景](cowork/background.md)、[待办](cowork/todo.md) 和 [项目规则](cowork/rules.md) 开始；技术资料见 [文档索引](cowork/docs/README.md)。
