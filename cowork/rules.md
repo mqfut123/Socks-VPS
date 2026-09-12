@@ -9,13 +9,13 @@
 - WARP VPS Manager 的服务、端口、网卡、路由、nftables 表、配置和状态均视为外部资源；Socks-VPS 不得接管、覆盖、停止、删除或借用其状态。
 - “部署机器相同”只用于识别共存约束，不能作为复制另一个项目实现、依赖或系统结论的依据。
 
-## 开始工作前
+## 项目资料索引
 
-1. 阅读 `cowork/docs/implementation-preferences.md` 和 `cowork/docs/initial-baseline.md`。
-2. 阅读 `cowork/background.md` 和 `cowork/docs/timeline.md`，核对当前状态与历史决策。
-3. 阅读当前需求相关的实现、调用方、测试和文档。
-4. 搜索项目中已有能力，并核对依赖的官方契约与当前锁定版本。
-5. 目标、协议、信任边界或系统影响范围不清楚时，先与用户确认，不猜测 Socks-VPS 的产品形态。
+- `cowork/docs/implementation-preferences.md`：系统适配、安装体验、共存与交付规则。
+- `cowork/docs/initial-baseline.md`：初版冻结的目标与验收边界。
+- `cowork/background.md`：项目范围；`cowork/docs/timeline.md`：重要变动与历史决定。
+
+修改前核对当前需求相关的实现、调用方、测试和文档，复用已有能力并核对锁定依赖契约。目标、协议、信任边界或系统影响范围不清楚时，先与用户确认，不猜测 Socks-VPS 的产品形态。
 
 ## 实现原则
 
