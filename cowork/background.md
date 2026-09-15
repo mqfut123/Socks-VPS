@@ -5,7 +5,7 @@ Socks-VPS 在 Linux VPS 上提供需要用户名/密码的 IPv4 SOCKS5 TCP `CONN
 - 仓库：[mqfut123/Socks-VPS](https://github.com/mqfut123/Socks-VPS)，公开仓库，项目位于根目录。
 - 迁移读取基线：`7ec1d3d`（2026-09-05）。
 - 最近已记录发布：[v1.3.1](https://github.com/mqfut123/Socks-VPS/releases/tag/v1.3.1)；该次公开发布与资产回验已完成，版本验收范围见 [timeline](docs/timeline.md)。
-- Outline：未上线，暂无需阅读和更新。
+- Outline 已上线；入口、MCP 接入与长期知识同步规则见[根 AGENTS](../AGENTS.md#outline长期知识接入)。本仓库既有文档继续维护项目权威与工程状态。
 
 ## 实现与交付
 
