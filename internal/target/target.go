@@ -177,6 +177,11 @@ func isPublic(address netip.Addr) bool {
 	return true
 }
 
+// IsPublicIPv4 applies the same public IPv4 boundary used for proxy targets.
+func IsPublicIPv4(address netip.Addr) bool {
+	return isPublic(address)
+}
+
 func currentLocalIPv4() (map[netip.Addr]struct{}, error) {
 	addresses, err := net.InterfaceAddrs()
 	if err != nil {

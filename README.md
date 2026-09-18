@@ -11,6 +11,7 @@ bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download
 ## 为什么选择 Socks-VPS
 
 - **安装只需选择端口和大陆访问方式。** 用户名和密码自动生成，安装结束显示完整连接信息，可以直接用于配置客户端。
+- **直接导入 Xray 客户端。** 每组 SOCKS 会生成可被支持该格式的 Xray 客户端识别的 `socks://` 分享链接，安装、列表和状态页面都可以直接复制。
 - **一台 VPS 管理多组连接。** 每组 SOCKS 都有独立端口、用户名和密码，便于按设备或用途分配；全部配置由同一个进程运行。
 - **按端口控制大陆来源。** 启用阻断后，命中大陆 IPv4 地址库的连接会在 TCP 握手完成前被丢弃；不同端口可以分别选择是否阻断。
 - **日常维护从中文菜单完成。** 查看连接信息、新增或删除 SOCKS、修改账号和访问设置，都有对应入口，后续调整不需要手工编辑配置文件。
@@ -37,6 +38,7 @@ TCP 端口 [回车 = 随机选择 1024-65535]：
 密码：qP9kD2wR7xM4bV8nC5zT
 配置名称：socks-1
 中国大陆来源阻断：开启
+导入链接：socks://...
 
 • 打开管理菜单：sudo socks-vpsctl
 ```
@@ -44,6 +46,8 @@ TCP 端口 [回车 = 随机选择 1024-65535]：
 公网 IPv4 查询失败时，请在客户端填写 VPS 的公网 IPv4 地址。
 
 在云平台安全组和主机防火墙中放行所选 TCP 端口，然后在支持 SOCKS5 用户名/密码认证的客户端中填入服务器 IPv4、端口、用户名和密码。
+
+在 v2rayN、v2rayNG 等支持 `socks://` 分享链接的客户端中，复制链接后选择从剪贴板导入即可。
 
 以后需要查看或修改设置，运行：
 
@@ -77,6 +81,9 @@ sudo socks-vpsctl add
 # 修改连接设置
 sudo socks-vpsctl credentials
 
+# 重新生成公网地址变化后的导入链接
+sudo socks-vpsctl link [CONFIG]
+
 # 永久删除一个配置
 sudo socks-vpsctl remove
 
@@ -90,7 +97,9 @@ sudo socks-vpsctl cleanup
 sudo socks-vpsctl uninstall
 ```
 
-`status` 检查服务、监听、认证和所需防火墙状态；`status` 和 `list` 都会逐项显示每组 SOCKS 的名称、端口、用户名、密码和大陆来源设置。
+`status` 检查服务、监听、认证和所需防火墙状态；`status` 和 `list` 都会逐项显示每组 SOCKS 的名称、端口、用户名、密码、大陆来源设置和导入链接。
+
+首次生成链接时，安装器通过 IPv4 查询服务取得公网 IPv4，并把完整链接保存为对应实例的 `.url` 文件。已有链接不会在 `list`、`status` 或后续结果页重复查询公网 IP。修改凭据时用原公网 IPv4 更新链接；公网 IPv4 变化后，运行 `sudo socks-vpsctl link [CONFIG]` 主动重新生成。首次查询失败时显示未生成；主动刷新失败时保留原链接并提示原因。
 
 ### 新增、修改和删除
 
@@ -106,6 +115,7 @@ sudo socks-vpsctl uninstall
 
 ```bash
 sudo socks-vpsctl credentials socks-1
+sudo socks-vpsctl link socks-1
 sudo socks-vpsctl remove socks-2
 ```
 
@@ -136,6 +146,7 @@ sudo systemctl start socks-vps.service
 ## 配置与资源
 
 - SOCKS 配置：`/etc/socks-vps/instances/*.json`
+- SOCKS 导入链接缓存：`/etc/socks-vps/instances/*.url`
 - 管理命令：`/usr/local/bin/socks-vpsctl`
 - 程序入口：`/usr/local/bin/socks-vps`
 - 当前版本：`/usr/local/lib/socks-vps/current`

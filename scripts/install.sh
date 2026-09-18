@@ -409,7 +409,8 @@ choose_existing_action() {
     printf '  6) 重装并永久替换全部 SOCKS 配置\n'
     printf '  7) 清理日志\n'
     printf '  8) 永久卸载\n'
-    printf '  9) 取消\n'
+    printf '  9) 重新生成 Xray/SOCKS 导入链接\n'
+    printf '  10) 取消\n'
     IFS= read -r -p '请选择：' choice
 
     case ${choice} in
@@ -462,6 +463,11 @@ choose_existing_action() {
             selected_allow_cn=false
             ;;
         9)
+            ensure_root_for_command link
+            direct_link ''
+            exit 0
+            ;;
+        10)
             exit 0
             ;;
         *)
@@ -1842,9 +1848,10 @@ install_or_replace() {
         "${password}" \
         "${allow_cn}" \
         "${requested_port}"
+    prepare_share_link "${name}" "${instances_dir}/${name}.json" || :
     commit_transaction
     cleanup_legacy_artifacts
-    print_connection_details "${name}"
+    print_connection_details "${name}" true
 }
 
 uninstall_permanently() {
@@ -1918,6 +1925,78 @@ read_config_detail() {
     exec {descriptor}<&-
 }
 
+write_share_link() {
+    local path=$1
+    local link=$2
+    local temporary
+
+    # mktemp creates mode 0600 before credential data is written.
+    temporary=$(mktemp "${path%/*}/.${path##*/}.pending-XXXXXXXX") || return 1
+    if ! chmod 0640 "${temporary}" ||
+       ! chown root:socks-vps "${temporary}" ||
+       ! printf '%s\n' "${link}" >"${temporary}" ||
+       ! mv -T "${temporary}" "${path}"; then
+        rm -f -- "${temporary}"
+        status_line error "无法保存导入链接：${path}" 2
+        return 1
+    fi
+}
+
+prepare_share_link() {
+    local name=$1
+    local config_path=$2
+    local mode=${3:-cached}
+    local path="${config_path%.json}.url"
+    local saved_link='' link=''
+
+    detail_share_link=
+    detail_server_ip='请填写 VPS 公网 IPv4'
+    if [[ -s ${path} ]]; then
+        IFS= read -r saved_link <"${path}" || {
+            status_line error "无法读取导入链接：${path}" 2
+            return 1
+        }
+        if [[ ${saved_link} =~ ^socks://[^@]+@([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):[0-9]+# ]]; then
+            detail_server_ip=${BASH_REMATCH[1]}
+        elif [[ ${mode} == cached ]]; then
+            status_line error "导入链接格式无效，请运行 socks-vpsctl link ${name} 重新生成" 2
+            return 1
+        else
+            # Credential changes and explicit refreshes must not reuse a bad cache.
+            saved_link=
+        fi
+        if [[ ${mode} == cached ]]; then
+            detail_share_link=${saved_link}
+            return 0
+        fi
+    fi
+
+    if [[ ${mode} != credentials || -z ${saved_link} ]]; then
+        # Share one lookup, including its failure, within this management command.
+        if [[ ${share_lookup_attempted:-false} == false ]]; then
+            share_lookup_attempted=true
+            share_lookup_address=$(detect_server_ipv4)
+        fi
+        detail_server_ip=${share_lookup_address}
+    fi
+    if [[ ${detail_server_ip} == '请填写 VPS 公网 IPv4' ]]; then
+        status_line error '公网 IPv4 查询失败，请手动填写连接信息或稍后运行 socks-vpsctl link' 2
+        return 1
+    fi
+    if link=$("${package_binary}" config-link \
+        --config "${config_path}" \
+        --address "${detail_server_ip}" \
+        --name "${name}") && write_share_link "${path}" "${link}"; then
+        detail_share_link=${link}
+        return 0
+    fi
+    if [[ ${mode} == credentials ]]; then
+        # A successful credential change must never leave the old link active.
+        rm -f -- "${path}" || die "无法撤销旧导入链接：${path}"
+    fi
+    return 1
+}
+
 print_instance_summary() {
     local name=$1
     local path=$2
@@ -1939,6 +2018,13 @@ print_instance_summary() {
     printf '  用户名：%s\n' "${detail_username}"
     printf '  密码：%s\n' "${detail_password}"
     printf '  中国大陆来源阻断：%s\n' "${cn_text}"
+    if [[ -z ${number} ]]; then
+        if prepare_share_link "${name}" "${path}"; then
+            printf '  导入链接：%s\n' "${detail_share_link}"
+        else
+            printf '  导入链接：未生成\n'
+        fi
+    fi
 }
 
 list_instances() {
@@ -2018,10 +2104,15 @@ detect_server_ipv4() {
 
 print_connection_details() {
     local name=$1
-    local server_ip cn_text
+    local prepared=${2:-false}
+    local cn_text
 
     read_config_detail "${instances_dir}/${name}.json"
-    server_ip=$(detect_server_ipv4)
+    if [[ ${prepared} == false ]]; then
+        if ! prepare_share_link "${name}" "${instances_dir}/${name}.json"; then
+            detail_share_link=
+        fi
+    fi
     if [[ ${detail_allow_cn} == true ]]; then
         cn_text='关闭'
     else
@@ -2030,12 +2121,13 @@ print_connection_details() {
 
     printf '\n'
     success 'Socks-VPS 已就绪'
-    printf '服务器 IPv4：%s\n' "${server_ip}"
+    printf '服务器 IPv4：%s\n' "${detail_server_ip}"
     printf '端口：%s\n' "${detail_port}"
     printf '用户名：%s\n' "${detail_username}"
     printf '密码：%s\n' "${detail_password}"
     printf '配置名称：%s\n' "${name}"
     printf '中国大陆来源阻断：%s\n' "${cn_text}"
+    printf '导入链接：%s\n' "${detail_share_link:-未生成}"
     printf '\n'
 }
 
@@ -2085,9 +2177,10 @@ add_instance() {
         "${password}" \
         "${allow_cn}" \
         "${selected}"
+    prepare_share_link "${name}" "${instances_dir}/${name}.json" || :
     commit_transaction
     cleanup_legacy_artifacts
-    print_connection_details "${name}"
+    print_connection_details "${name}" true
 }
 
 change_instance_settings() {
@@ -2136,11 +2229,14 @@ change_instance_settings() {
     chown root:socks-vps "${pending}"
     chmod 0640 "${pending}"
     mv -T "${pending}" "${target}"
+    if ! prepare_share_link "${name}" "${target}" credentials; then
+        detail_share_link=
+    fi
     note '正在启动服务并执行自检'
     start_preserved_and_verify
     commit_transaction
     cleanup_legacy_artifacts
-    print_connection_details "${name}"
+    print_connection_details "${name}" true
 }
 
 remove_instance() {
@@ -2174,6 +2270,7 @@ remove_instance() {
     begin_transaction remove
     stop_owned_services
     rm -f -- "${target}"
+    rm -f -- "${target%.json}.url"
     note '正在启动服务并执行自检'
     start_preserved_and_verify
     commit_transaction
@@ -2412,6 +2509,20 @@ direct_credentials() {
         "${selected_password}"
 }
 
+direct_link() {
+    local requested=${1:-}
+
+    installation_exists || die '尚未安装 Socks-VPS'
+    [[ -d ${instances_dir} ]] ||
+        die '请先更新 Socks-VPS，再生成 Xray/SOCKS 导入链接'
+    select_instance_name "${requested}"
+    prepare_share_link "${selected_instance_name}" \
+        "${instances_dir}/${selected_instance_name}.json" refresh ||
+        die '导入链接未更新，请按上方提示处理'
+    success '导入链接已重新生成'
+    printf '%s\n' "${detail_share_link}"
+}
+
 direct_remove() {
     local requested=${1:-}
     local version
@@ -2480,6 +2591,11 @@ main() {
             ensure_root_for_command "$@"
             direct_credentials "${2:-}"
             ;;
+        link)
+            [[ $# -le 2 ]] || die '用法：socks-vpsctl link [CONFIG]'
+            ensure_root_for_command "$@"
+            direct_link "${2:-}"
+            ;;
         remove)
             [[ $# -le 2 ]] || die '用法：socks-vpsctl remove [CONFIG]'
             ensure_root_for_command "$@"
@@ -2509,7 +2625,7 @@ main() {
             privileged_entry "$2" "$3" "$4" "$5" "$6" "$7"
             ;;
         *)
-            die '用法：socks-vpsctl {list|status|add|credentials [CONFIG]|remove [CONFIG]|update|cleanup|uninstall}'
+            die '用法：socks-vpsctl {list|status|add|credentials [CONFIG]|link [CONFIG]|remove [CONFIG]|update|cleanup|uninstall}'
             ;;
     esac
 }

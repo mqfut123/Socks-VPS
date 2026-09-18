@@ -8,7 +8,7 @@
 
 | 编号 | 事项 | 状态 | 执行角色 | 下一步与完成依据 |
 |---|---|---|---|---|
-| SOCKS-ACCEPT-01 | v1.3.1 Linux 实际验收 | 待授权测试环境 | 维护者与运维 | 核对 APT / DNF、amd64 / arm64、systemd、端口、真实 nftables 与计数、CN `n → y → n`、真实流量及同机共存；按 [实现偏好](docs/implementation-preferences.md) 记录实际环境与结果。历史版本结论不替代本版本验收。 |
+| SOCKS-ACCEPT-01 | v1.3.2 Linux 与客户端实际验收 | 待授权测试环境 | 维护者与运维 | 核对 APT / DNF、amd64 / arm64、systemd、端口、真实 nftables 与计数、CN `n → y → n`、真实流量及同机共存；补充导入链接的客户端导入连接、公网 IPv4 变化后手动刷新。按 [实现偏好](docs/implementation-preferences.md) 记录实际环境与结果，历史版本结论不替代本版本验收。 |
 | SOCKS-TEST-01 | 可复用测试与发布工具的共享交接 | 待独立审阅 | 项目维护者 | v1.1.0起有意保留本地发行工具与测试：4个scripts、5个Go测试、10个集成测试仍在原源码路径。按协作需要审阅依赖、敏感信息与完整验证，决定是否共享，并按实际文件调整精确公开清单。 |
 
 ## 已完成

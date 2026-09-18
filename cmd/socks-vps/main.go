@@ -11,10 +11,12 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -62,6 +64,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = configCreateCommand(args[1:], stdin, stdout, stderr)
 	case "config-detail":
 		code, err = configDetailCommand(args[1:], stdout, stderr)
+	case "config-link":
+		code, err = configLinkCommand(args[1:], stdout, stderr)
 	case "config-port":
 		code, err = configPortCommand(args[1:], stdout, stderr)
 	case "config-ports":
@@ -96,6 +100,7 @@ Commands:
   config-check   strictly validate an existing configuration
   config-create  validate or write the authoritative configuration
   config-detail  print one NUL-delimited configuration record
+  config-link    print an Xray-compatible SOCKS share URL
   config-port    print the configured IPv4 TCP listener port
   config-ports   print listener ports from a configuration directory
   credentials-generate generate a random NUL-delimited credential pair
@@ -333,6 +338,53 @@ func configDetailCommand(args []string, stdout, stderr io.Writer) (int, error) {
 		if _, err := stdout.Write([]byte{0}); err != nil {
 			return exitRuntimeError, fmt.Errorf("write configuration detail delimiter: %w", err)
 		}
+	}
+	return exitOK, nil
+}
+
+func configLinkCommand(args []string, stdout, stderr io.Writer) (int, error) {
+	flags := newFlagSet("config-link", stderr)
+	configPath := flags.String("config", "", "path to config.json")
+	address := flags.String("address", "", "public IPv4 address")
+	name := flags.String("name", "", "configuration name used in the URL fragment")
+	if err := flags.Parse(args); err != nil {
+		return flagExitCode(err), flagError(err)
+	}
+	if err := requireNoPositionals(flags); err != nil {
+		return exitConfigError, err
+	}
+	if *configPath == "" {
+		return exitConfigError, errors.New("config-link requires --config")
+	}
+	if *address == "" {
+		return exitConfigError, errors.New("config-link requires --address")
+	}
+	if *name == "" {
+		return exitConfigError, errors.New("config-link requires --name")
+	}
+	ip, err := netip.ParseAddr(*address)
+	if err != nil || !target.IsPublicIPv4(ip) {
+		return exitConfigError, errors.New("config-link requires a public IPv4 address")
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return exitConfigError, err
+	}
+	// Clients split decoded credentials at the first colon. Keep this restriction
+	// at the share boundary; it does not change valid SOCKS credentials.
+	if strings.Contains(cfg.Username, ":") {
+		return exitConfigError, errors.New("用户名包含冒号，无法生成导入链接；请在客户端手动填写连接信息")
+	}
+	link := url.URL{
+		Scheme: "socks",
+		User: url.User(base64.StdEncoding.EncodeToString(
+			[]byte(cfg.Username + ":" + cfg.Password),
+		)),
+		Host:     net.JoinHostPort(ip.String(), strconv.Itoa(cfg.Port)),
+		Fragment: *name + "-" + ip.String(),
+	}
+	if _, err := fmt.Fprintln(stdout, link.String()); err != nil {
+		return exitRuntimeError, fmt.Errorf("write configuration link: %w", err)
 	}
 	return exitOK, nil
 }
