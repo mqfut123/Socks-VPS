@@ -3,7 +3,7 @@
 [程序入口](cmd/) · [实现代码](internal/)
 
 ```bash
-bash <(curl -fsSL https://github.com/NovixLink/Socks-VPS/releases/latest/download/install.sh)
+bash <(curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download/install.sh)
 ```
 
 在自己的 Linux VPS 上运行 SOCKS5 代理，为不同设备、应用或使用者分配连接，并通过中文菜单管理。
@@ -63,7 +63,7 @@ sudo socks-vpsctl
 
 ```bash
 umask 077
-curl -fsSL https://github.com/NovixLink/Socks-VPS/releases/latest/download/install.sh -o install.sh
+curl -fsSL https://github.com/mqfut123/Socks-VPS/releases/latest/download/install.sh -o install.sh
 bash install.sh --non-interactive \
   --port 45123 \
   --username client \
